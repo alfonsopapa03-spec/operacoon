@@ -455,7 +455,7 @@ class DB:
             'total_viajes': len(df),
             'viajes_legalizados': int(df['legalizado'].sum()),
             'viajes_pendientes': len(df) - int(df['legalizado'].sum()),
-            'total_anticipos': total_anticipos,
+            'total_anticipos': total_anticipos,       # <-- clave correcta con 's'
             'promedio_anticipo': promedio,
             'primera_operacion': df['fecha_viaje'].min(),
             'ultima_operacion': df['fecha_viaje'].max(),
@@ -739,7 +739,6 @@ def main():
             st.info("No hay clientes registrados aún.")
         else:
             opciones_ids = df_clientes_lista['id'].tolist()
-            opciones_nombres = df_clientes_lista['nombre'].tolist()
 
             idx_default = 0
             if st.session_state.cliente_seleccionado in opciones_ids:
@@ -789,12 +788,12 @@ def main():
                             st.session_state.confirmar_eliminar_cliente = cliente_id_sel
                             st.rerun()
 
-                # KPIs rápidos
+                # KPIs rápidos — CORRECCIÓN: total_anticipos (con 's')
                 k1, k2, k3, k4, k5 = st.columns(5)
                 k1.metric("Total viajes",       kpis['total_viajes'])
                 k2.metric("Legalizados",        kpis['viajes_legalizados'])
                 k3.metric("Pendientes",         kpis['viajes_pendientes'])
-                k4.metric("Total anticipos",    f"${fmt(kpis['total_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
+                k4.metric("Total anticipos",    f"${fmt(kpis['total_anticipos'])}" if kpis['total_viajes'] > 0 else "$0")
                 k5.metric("Promedio anticipo",  f"${fmt(kpis['promedio_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
 
                 st.divider()
@@ -815,11 +814,11 @@ def main():
                         with st.form("form_editar_cliente"):
                             col1e, col2e = st.columns(2)
                             with col1e:
-                                nombre_e   = st.text_input("Nombre / Razón social", value=cliente['nombre'])
-                                nit_e      = st.text_input("NIT", value=cliente.get('nit','') or '')
-                                ciudad_e   = st.text_input("Ciudad", value=cliente.get('ciudad','') or '')
+                                nombre_e    = st.text_input("Nombre / Razón social", value=cliente['nombre'])
+                                nit_e       = st.text_input("NIT", value=cliente.get('nit','') or '')
+                                ciudad_e    = st.text_input("Ciudad", value=cliente.get('ciudad','') or '')
                                 direccion_e = st.text_input("Dirección", value=cliente.get('direccion','') or '')
-                                fi_rel_e   = st.date_input(
+                                fi_rel_e    = st.date_input(
                                     "Inicio de la relación comercial",
                                     value=pd.to_datetime(cliente['fecha_inicio_relacion']).date()
                                     if cliente.get('fecha_inicio_relacion') else datetime.today()
@@ -944,13 +943,13 @@ def main():
                     with st.form(f"form_contacto_{cliente_id_sel}", clear_on_submit=True):
                         col_c1, col_c2 = st.columns(2)
                         with col_c1:
-                            nombre_cont  = st.text_input("Nombre completo *")
-                            cargo_cont   = st.text_input("Cargo")
-                            principal_c  = st.checkbox("Es el contacto principal")
+                            nombre_cont = st.text_input("Nombre completo *")
+                            cargo_cont  = st.text_input("Cargo")
+                            principal_c = st.checkbox("Es el contacto principal")
                         with col_c2:
-                            tel_cont     = st.text_input("Teléfono")
-                            email_cont   = st.text_input("Email")
-                            obs_cont     = st.text_area("Observaciones", height=60)
+                            tel_cont    = st.text_input("Teléfono")
+                            email_cont  = st.text_input("Email")
+                            obs_cont    = st.text_area("Observaciones", height=60)
                         if st.form_submit_button("💾 Agregar contacto", type="primary"):
                             if not nombre_cont.strip():
                                 st.error("⚠️ El nombre es obligatorio.")
@@ -987,10 +986,10 @@ def main():
                                     with st.form(f"form_edit_tar_{tar['id']}"):
                                         col_te1, col_te2 = st.columns(2)
                                         with col_te1:
-                                            orig_e = st.text_input("Origen", value=tar['origen'])
-                                            dest_e = st.text_input("Destino", value=tar['destino'])
+                                            orig_e  = st.text_input("Origen", value=tar['origen'])
+                                            dest_e  = st.text_input("Destino", value=tar['destino'])
                                             tar_e_txt = st.text_input("Tarifa (COP)", value=fmt(tar['tarifa']))
-                                            tar_e = limpiar(tar_e_txt)
+                                            tar_e   = limpiar(tar_e_txt)
                                         with col_te2:
                                             tv_e = st.selectbox(
                                                 "Tipo vehículo", TIPOS_VEHICULO,
@@ -1059,17 +1058,17 @@ def main():
                     with st.form(f"form_tarifa_{cliente_id_sel}", clear_on_submit=True):
                         col_t1, col_t2 = st.columns(2)
                         with col_t1:
-                            orig_t   = st.text_input("Origen *", placeholder="Ciudad de origen")
-                            dest_t   = st.text_input("Destino *", placeholder="Ciudad de destino")
-                            tar_txt  = st.text_input("Tarifa (COP) *", placeholder="Ej: 1.500.000")
-                            tar_val  = limpiar(tar_txt)
+                            orig_t  = st.text_input("Origen *", placeholder="Ciudad de origen")
+                            dest_t  = st.text_input("Destino *", placeholder="Ciudad de destino")
+                            tar_txt = st.text_input("Tarifa (COP) *", placeholder="Ej: 1.500.000")
+                            tar_val = limpiar(tar_txt)
                             if tar_val > 0:
                                 st.caption(f"💵 {fmt(tar_val)} COP")
                         with col_t2:
-                            tipo_v   = st.selectbox("Tipo de vehículo", TIPOS_VEHICULO)
+                            tipo_v    = st.selectbox("Tipo de vehículo", TIPOS_VEHICULO)
                             vigente_t = st.checkbox("Vigente", value=True)
-                            fd_t     = st.date_input("Fecha desde", value=datetime.today())
-                            fh_t     = st.date_input("Fecha hasta (opcional)", value=None)
+                            fd_t      = st.date_input("Fecha desde", value=datetime.today())
+                            fh_t      = st.date_input("Fecha hasta (opcional)", value=None)
                             reg_por_t = st.text_input("Registrado por", placeholder="Tu nombre")
                         obs_t = st.text_input("Observaciones")
                         if st.form_submit_button("💾 Registrar tarifa", type="primary"):
@@ -1138,9 +1137,9 @@ def main():
                         for _, nota in df_notas_c.iterrows():
                             completada = bool(nota.get('completada', False))
                             tipo_label = badge_tipo_nota(nota.get('tipo','nota'))
-                            fecha_seg = nota.get('fecha_seguimiento')
-                            seg_tag = f" | 📅 Seguimiento: {fmt_fecha(fecha_seg)}" if fecha_seg else ""
-                            check_tag = " ✅" if completada else ""
+                            fecha_seg  = nota.get('fecha_seguimiento')
+                            seg_tag    = f" | 📅 Seguimiento: {fmt_fecha(fecha_seg)}" if fecha_seg else ""
+                            check_tag  = " ✅" if completada else ""
                             with st.expander(f"{tipo_label} | {nota['titulo']}{seg_tag}{check_tag}"):
                                 col_na, col_nb = st.columns([4,1])
                                 with col_na:
@@ -1186,7 +1185,7 @@ def main():
                         contenido_nota = st.text_area("Contenido / Detalle *", height=100)
                         if st.form_submit_button("💾 Guardar nota", type="primary"):
                             errores_n = []
-                            if not titulo_nota.strip():   errores_n.append("El título es obligatorio.")
+                            if not titulo_nota.strip():    errores_n.append("El título es obligatorio.")
                             if not contenido_nota.strip(): errores_n.append("El contenido es obligatorio.")
                             if errores_n:
                                 for en in errores_n: st.error(f"⚠️ {en}")
@@ -1200,7 +1199,7 @@ def main():
                                     'fecha_seguimiento': fecha_seg_n,
                                 })
                                 if nid_n:
-                                    st.success(f"✅ Nota guardada.")
+                                    st.success("✅ Nota guardada.")
                                     st.rerun()
 
     # ==================== TAB 3: NUEVO CLIENTE ====================
@@ -1356,8 +1355,8 @@ def main():
             if len(df_todas) > 0:
                 st.divider()
                 st.subheader("Comparativo por ruta")
-                rutas_unicas = df_todas[['Origen','Destino']].drop_duplicates()
-                rutas_labels = [f"{r['Origen']} → {r['Destino']}" for _, r in rutas_unicas.iterrows()]
+                rutas_unicas  = df_todas[['Origen','Destino']].drop_duplicates()
+                rutas_labels  = [f"{r['Origen']} → {r['Destino']}" for _, r in rutas_unicas.iterrows()]
                 if rutas_labels:
                     ruta_sel = st.selectbox("Seleccionar ruta", rutas_labels, key="comp_ruta")
                     if ruta_sel:
