@@ -794,7 +794,8 @@ def main():
                 k1.metric("Total viajes",       kpis['total_viajes'])
                 k2.metric("Legalizados",        kpis['viajes_legalizados'])
                 k3.metric("Pendientes",         kpis['viajes_pendientes'])
-k4.metric("Total anticipos",    f"${fmt(kpis['total_anticipos'])}" if kpis['total_viajes'] > 0 else "$0")                k5.metric("Promedio anticipo",  f"${fmt(kpis['promedio_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
+                k4.metric("Total anticipos",    f"${fmt(kpis['total_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
+                k5.metric("Promedio anticipo",  f"${fmt(kpis['promedio_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
 
                 st.divider()
 
