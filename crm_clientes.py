@@ -1,14 +1,11 @@
 """
 CRM de Clientes - Transporte de Carga
 Colombia - Conectado a Supabase (PostgreSQL)
-Complemento del Sistema de Anticipos v1
 Módulos:
   - Ficha completa de cada cliente
-  - Historial de viajes por cliente (vinculado a anticipos_v1)
   - Tarifas pactadas por ruta
   - Contactos del cliente
   - Notas y seguimiento comercial
-  - KPIs por cliente (viajes, facturación, rutas frecuentes)
   - Exportación a Excel
 """
 
@@ -190,10 +187,6 @@ class DB:
 
     def obtener_cliente(self, cliente_id):
         df = self._query_df("SELECT * FROM crm_clientes WHERE id = %s", (cliente_id,))
-        return df.iloc[0] if not df.empty else None
-
-    def obtener_cliente_por_nombre(self, nombre):
-        df = self._query_df("SELECT * FROM crm_clientes WHERE nombre ILIKE %s", (nombre,))
         return df.iloc[0] if not df.empty else None
 
     def crear_cliente(self, data):
@@ -409,70 +402,13 @@ class DB:
     def eliminar_nota(self, nota_id):
         self._exec("DELETE FROM crm_notas WHERE id = %s", (nota_id,))
 
-    # ---- Historial de viajes desde anticipos_v1 ----
-    def obtener_viajes_cliente(self, nombre_cliente, fecha_ini=None, fecha_fin=None):
-        q = "SELECT * FROM anticipos_v1 WHERE cliente ILIKE %s"
-        params = [f"%{nombre_cliente}%"]
-        if fecha_ini:
-            q += " AND fecha_viaje >= %s"; params.append(fecha_ini)
-        if fecha_fin:
-            q += " AND fecha_viaje <= %s"; params.append(fecha_fin)
-        q += " ORDER BY fecha_viaje DESC"
-        return self._query_df(q, params)
-
-    def obtener_kpis_cliente(self, nombre_cliente):
-        df = self._query_df(
-            "SELECT * FROM anticipos_v1 WHERE cliente ILIKE %s",
-            (f"%{nombre_cliente}%",)
-        )
-        if df.empty:
-            return {
-                'total_viajes': 0, 'viajes_legalizados': 0, 'viajes_pendientes': 0,
-                'total_anticipos': 0, 'promedio_anticipo': 0,
-                'primera_operacion': None, 'ultima_operacion': None,
-                'rutas': pd.DataFrame(), 'conductores': pd.DataFrame(),
-                'por_mes': pd.DataFrame()
-            }
-        total_anticipos = int(df['valor_anticipo'].sum())
-        promedio = int(df['valor_anticipo'].mean()) if len(df) > 0 else 0
-
-        rutas = df.groupby(['origen','destino']).agg(
-            viajes=('id','count'),
-            anticipo_total=('valor_anticipo','sum')
-        ).reset_index().sort_values('viajes', ascending=False)
-
-        conductores = df.groupby('conductor').agg(
-            viajes=('id','count')
-        ).reset_index().sort_values('viajes', ascending=False)
-
-        df['mes'] = pd.to_datetime(df['fecha_viaje']).dt.to_period('M').astype(str)
-        por_mes = df.groupby('mes').agg(
-            viajes=('id','count'),
-            anticipos=('valor_anticipo','sum')
-        ).reset_index().sort_values('mes')
-
-        return {
-            'total_viajes': len(df),
-            'viajes_legalizados': int(df['legalizado'].sum()),
-            'viajes_pendientes': len(df) - int(df['legalizado'].sum()),
-            'total_anticipos': total_anticipos,       # <-- clave correcta con 's'
-            'promedio_anticipo': promedio,
-            'primera_operacion': df['fecha_viaje'].min(),
-            'ultima_operacion': df['fecha_viaje'].max(),
-            'rutas': rutas,
-            'conductores': conductores,
-            'por_mes': por_mes
-        }
-
-    def obtener_todos_clientes_con_kpis(self):
+    # ---- Resumen clientes (sin anticipos) ----
+    def obtener_resumen_clientes(self):
         df_clientes = self.obtener_clientes()
-        df_viajes = self._query_df("SELECT cliente, valor_anticipo, legalizado, fecha_viaje FROM anticipos_v1")
         if df_clientes.empty:
             return pd.DataFrame()
         resultados = []
         for _, c in df_clientes.iterrows():
-            viajes_c = df_viajes[df_viajes['cliente'].str.upper() == c['nombre'].upper()] \
-                if not df_viajes.empty else pd.DataFrame()
             resultados.append({
                 'id': c['id'],
                 'nombre': c['nombre'],
@@ -482,10 +418,7 @@ class DB:
                 'condicion_pago': c.get('condicion_pago',''),
                 'contacto_principal': c.get('contacto_principal',''),
                 'telefono': c.get('telefono',''),
-                'total_viajes': len(viajes_c),
-                'total_anticipos': int(viajes_c['valor_anticipo'].sum()) if not viajes_c.empty else 0,
-                'pendientes': int((~viajes_c['legalizado'].astype(bool)).sum()) if not viajes_c.empty else 0,
-                'ultima_operacion': viajes_c['fecha_viaje'].max() if not viajes_c.empty else None,
+                'fecha_inicio_relacion': c.get('fecha_inicio_relacion'),
             })
         return pd.DataFrame(resultados)
 
@@ -504,14 +437,13 @@ def generar_excel_crm(db) -> BytesIO:
 
     ws1 = wb.active
     ws1.title = "Clientes"
-    ws1.merge_cells("A1:N1")
+    ws1.merge_cells("A1:L1")
     ws1["A1"] = f"CRM Clientes — {hora_colombia().strftime('%d/%m/%Y %H:%M')}"
     ws1["A1"].font = ft
     ws1["A1"].alignment = center
 
     cols1 = ["ID","Nombre","NIT","Ciudad","Teléfono","Email","Contacto principal",
-             "Condición pago","Categoría","Estado","Observaciones",
-             "Fecha inicio","Total viajes","Total anticipos (COP)"]
+             "Condición pago","Categoría","Estado","Observaciones","Fecha inicio"]
     rh = 3
     for ci, cn in enumerate(cols1, 1):
         cell = ws1.cell(row=rh, column=ci, value=cn)
@@ -520,11 +452,8 @@ def generar_excel_crm(db) -> BytesIO:
         cell.alignment = center
         cell.border = border
 
-    df_resumen = db.obtener_todos_clientes_con_kpis()
     df_clientes_full = db.obtener_clientes()
     for ri, (_, row) in enumerate(df_clientes_full.iterrows(), start=rh+1):
-        res = df_resumen[df_resumen['id'] == row['id']].iloc[0] \
-            if not df_resumen.empty and (df_resumen['id'] == row['id']).any() else None
         color_fila = "E8F5E9" if row.get('estado') == 'activo' else "F3F3F3"
         fill = PatternFill("solid", fgColor=color_fila)
         valores = [
@@ -534,17 +463,13 @@ def generar_excel_crm(db) -> BytesIO:
             row.get('categoria',''), row.get('estado',''),
             row.get('observaciones',''),
             str(row.get('fecha_inicio_relacion',''))[:10],
-            res['total_viajes'] if res is not None else 0,
-            res['total_anticipos'] if res is not None else 0,
         ]
         for ci, val in enumerate(valores, 1):
             cell = ws1.cell(row=ri, column=ci, value=val)
             cell.fill = fill; cell.border = border; cell.font = fn
-            cell.alignment = center if ci in [1,8,9,10,13,14] else left_a
-            if ci == 14:
-                cell.number_format = '#,##0'
+            cell.alignment = center if ci in [1,8,9,10] else left_a
 
-    anchos1 = [6,28,14,16,14,24,22,14,12,10,28,14,12,20]
+    anchos1 = [6,28,14,16,14,24,22,14,12,10,28,14]
     for ci, aw in enumerate(anchos1, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = aw
     ws1.freeze_panes = f"A{rh+1}"
@@ -632,7 +557,6 @@ def main():
         'confirmar_eliminar_tarifa': None,
         'confirmar_eliminar_nota': None,
         'editando_tarifa_id': None,
-        'tab_cliente_activo': 0,
     }
     for key, val in session_defaults.items():
         if key not in st.session_state:
@@ -655,23 +579,23 @@ def main():
     # ==================== TAB 1: RESUMEN ====================
     with tab_resumen:
         st.header("Resumen de clientes")
-        df_resumen = db.obtener_todos_clientes_con_kpis()
+        df_resumen = db.obtener_resumen_clientes()
 
         if df_resumen.empty:
             st.info("Aún no hay clientes registrados. Ve a **➕ Nuevo cliente** para comenzar.")
         else:
-            total_clientes  = len(df_resumen)
-            activos         = len(df_resumen[df_resumen['estado'] == 'activo'])
-            total_viajes    = int(df_resumen['total_viajes'].sum())
-            total_anticipos = int(df_resumen['total_anticipos'].sum())
-            con_pendientes  = int((df_resumen['pendientes'] > 0).sum())
+            total_clientes = len(df_resumen)
+            activos        = len(df_resumen[df_resumen['estado'] == 'activo'])
+            preferencial   = len(df_resumen[df_resumen['categoria'] == 'preferencial'])
+            potencial      = len(df_resumen[df_resumen['categoria'] == 'potencial'])
+            inactivos      = len(df_resumen[df_resumen['estado'] == 'inactivo'])
 
             col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Total clientes",       total_clientes)
-            col2.metric("Clientes activos",     activos)
-            col3.metric("Total viajes",         total_viajes)
-            col4.metric("Total anticipos",      f"${fmt(total_anticipos)}")
-            col5.metric("Con anticipos pend.",  con_pendientes)
+            col1.metric("Total clientes",    total_clientes)
+            col2.metric("Activos",           activos)
+            col3.metric("Preferenciales 🔵", preferencial)
+            col4.metric("Potenciales 🟡",    potencial)
+            col5.metric("Inactivos ⚫",      inactivos)
 
             st.divider()
 
@@ -694,27 +618,23 @@ def main():
             if filtro_estado_r != "Todos":
                 df_show = df_show[df_show['estado'].str.lower() == filtro_estado_r.lower()]
 
-            df_show = df_show.sort_values('total_viajes', ascending=False)
+            df_show = df_show.sort_values('nombre')
 
             for _, row in df_show.iterrows():
                 icono = "🔵" if row['categoria'] == 'preferencial' else \
                         "🟢" if row['categoria'] == 'regular' else \
                         "🟡" if row['categoria'] == 'potencial' else "⚫"
-                alerta_pend = f" | ⚠️ {row['pendientes']} pend." if row['pendientes'] > 0 else ""
                 label_r = (
                     f"{icono} **{row['nombre']}** | {row['ciudad']} | "
-                    f"{row['total_viajes']} viajes | ${fmt(row['total_anticipos'])} COP"
-                    f"{alerta_pend}"
+                    f"{row.get('condicion_pago','—')} | {row.get('categoria','').capitalize()}"
                 )
                 with st.expander(label_r):
                     col_ra, col_rb = st.columns([3, 2])
                     with col_ra:
                         st.write(f"📞 {row.get('telefono','—')} | 👤 {row.get('contacto_principal','—')}")
-                        st.write(f"💳 Condición pago: **{row.get('condicion_pago','—')}** | Categoría: **{row.get('categoria','').capitalize()}**")
-                        if row['ultima_operacion'] is not None:
-                            st.write(f"📅 Última operación: **{fmt_fecha(row['ultima_operacion'])}**")
-                        if row['pendientes'] > 0:
-                            st.warning(f"⚠️ Tiene **{row['pendientes']}** anticipo(s) sin legalizar")
+                        st.write(f"💳 Condición pago: **{row.get('condicion_pago','—')}**")
+                        if row.get('fecha_inicio_relacion') is not None:
+                            st.write(f"📅 Relación desde: **{fmt_fecha(row['fecha_inicio_relacion'])}**")
                     with col_rb:
                         if st.button("📂 Ver ficha completa", key=f"ver_{row['id']}", type="primary"):
                             st.session_state.cliente_seleccionado = row['id']
@@ -757,8 +677,6 @@ def main():
             if cliente is None:
                 st.error("Cliente no encontrado.")
             else:
-                kpis = db.obtener_kpis_cliente(cliente['nombre'])
-
                 col_h1, col_h2, col_h3 = st.columns([4, 1, 1])
                 with col_h1:
                     cat_badge = badge_categoria(cliente.get('categoria','regular'))
@@ -788,22 +706,13 @@ def main():
                             st.session_state.confirmar_eliminar_cliente = cliente_id_sel
                             st.rerun()
 
-                # KPIs rápidos — CORRECCIÓN: total_anticipos (con 's')
-                k1, k2, k3, k4, k5 = st.columns(5)
-                k1.metric("Total viajes",       kpis['total_viajes'])
-                k2.metric("Legalizados",        kpis['viajes_legalizados'])
-                k3.metric("Pendientes",         kpis['viajes_pendientes'])
-                k4.metric("Total anticipos",    f"${fmt(kpis['total_anticipos'])}" if kpis['total_viajes'] > 0 else "$0")
-                k5.metric("Promedio anticipo",  f"${fmt(kpis['promedio_anticipo'])}" if kpis['total_viajes'] > 0 else "$0")
-
                 st.divider()
 
                 # Pestañas de la ficha
-                ft1, ft2, ft3, ft4, ft5 = st.tabs([
+                ft1, ft2, ft3, ft4 = st.tabs([
                     "📋 Datos generales",
                     "👥 Contactos",
                     "💲 Tarifas pactadas",
-                    "📦 Historial de viajes",
                     "📝 Notas y seguimiento",
                 ])
 
@@ -890,20 +799,6 @@ def main():
                             st.write(f"📅 Relación desde: {fmt_fecha(cliente.get('fecha_inicio_relacion'))}")
                             if cliente.get('observaciones'):
                                 st.info(f"📝 {cliente['observaciones']}")
-
-                        if not kpis['rutas'].empty:
-                            st.divider()
-                            st.markdown("**Rutas más frecuentes**")
-                            df_rutas_show = kpis['rutas'].head(5).copy()
-                            df_rutas_show['anticipo_total'] = df_rutas_show['anticipo_total'].apply(lambda x: f"${fmt(x)}")
-                            df_rutas_show.columns = ['Origen','Destino','Viajes','Anticipo total']
-                            st.dataframe(df_rutas_show, use_container_width=True, hide_index=True)
-
-                        if not kpis['conductores'].empty:
-                            st.markdown("**Conductores frecuentes**")
-                            df_cond_show = kpis['conductores'].head(5).copy()
-                            df_cond_show.columns = ['Conductor','Viajes']
-                            st.dataframe(df_cond_show, use_container_width=True, hide_index=True)
 
                 # ---- Contactos ----
                 with ft2:
@@ -1091,43 +986,8 @@ def main():
                                     st.success(f"✅ Tarifa registrada: {orig_t.upper()} → {dest_t.upper()} | ${fmt(tar_val)} COP")
                                     st.rerun()
 
-                # ---- Historial de viajes ----
-                with ft4:
-                    st.subheader(f"Historial de viajes — {cliente['nombre']}")
-                    col_hv1, col_hv2 = st.columns(2)
-                    with col_hv1:
-                        fi_hv = st.date_input("Desde", value=None, key="hv_fi")
-                    with col_hv2:
-                        ff_hv = st.date_input("Hasta", value=None, key="hv_ff")
-
-                    df_viajes_c = db.obtener_viajes_cliente(
-                        cliente['nombre'],
-                        fi_hv.strftime('%Y-%m-%d') if fi_hv else None,
-                        ff_hv.strftime('%Y-%m-%d') if ff_hv else None
-                    )
-
-                    if df_viajes_c.empty:
-                        st.info("No se encontraron viajes para este cliente en el período seleccionado.")
-                    else:
-                        cols_v = ['id','manifiesto','fecha_viaje','placa','conductor',
-                                  'origen','destino','valor_anticipo','legalizado']
-                        df_v_show = df_viajes_c[[c for c in cols_v if c in df_viajes_c.columns]].copy()
-                        df_v_show['fecha_viaje'] = df_v_show['fecha_viaje'].apply(fmt_fecha)
-                        df_v_show['valor_anticipo'] = df_v_show['valor_anticipo'].apply(lambda x: f"${fmt(x)}")
-                        df_v_show['legalizado'] = df_v_show['legalizado'].apply(
-                            lambda x: "✅" if x else "🔴"
-                        )
-                        df_v_show.rename(columns={
-                            'id':'ID','manifiesto':'Manif.','fecha_viaje':'Fecha',
-                            'placa':'Placa','conductor':'Conductor',
-                            'origen':'Origen','destino':'Destino',
-                            'valor_anticipo':'Anticipo','legalizado':'Estado'
-                        }, inplace=True)
-                        st.dataframe(df_v_show, use_container_width=True, hide_index=True, height=300)
-                        st.caption(f"Total: **{len(df_viajes_c)}** viajes | Anticipos: **${fmt(df_viajes_c['valor_anticipo'].sum())} COP**")
-
                 # ---- Notas y seguimiento ----
-                with ft5:
+                with ft4:
                     st.subheader("Notas y seguimiento")
                     df_notas_c = db.obtener_notas(cliente_id_sel)
 
