@@ -187,7 +187,7 @@ class DB:
                     CREATE TABLE IF NOT EXISTS inspecciones_preop (
                         id SERIAL PRIMARY KEY,
                         fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
-                        fecha_inicio DATE NOT NULL,
+                        fecha_ini DATE NOT NULL,
                         fecha_fin DATE NOT NULL,
                         maquina TEXT NOT NULL,
                         modelo TEXT,
@@ -203,13 +203,13 @@ class DB:
                 """)
             else:
                 # Tabla existente: agregar columnas faltantes
-                if "fecha_inicio" not in cols_existentes:
-                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_inicio DATE")
+                if "fecha_ini" not in cols_existentes:
+                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_ini DATE")
                     # Si existía 'fecha', copiar sus valores
                     if "fecha" in cols_existentes:
-                        cur.execute("UPDATE inspecciones_preop SET fecha_inicio = fecha WHERE fecha_inicio IS NULL")
+                        cur.execute("UPDATE inspecciones_preop SET fecha_ini = fecha WHERE fecha_inicio IS NULL")
                     else:
-                        cur.execute("UPDATE inspecciones_preop SET fecha_inicio = CURRENT_DATE WHERE fecha_inicio IS NULL")
+                        cur.execute("UPDATE inspecciones_preop SET fecha_ini = CURRENT_DATE WHERE fecha_ini IS NULL")
                 if "fecha_fin" not in cols_existentes:
                     cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_fin DATE")
                     if "fecha" in cols_existentes:
@@ -251,12 +251,12 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 INSERT INTO inspecciones_preop
-                (fecha_inicio, fecha_fin, maquina, modelo, marca, placa, trabajador, revisado_por,
+                (fecha_ini, fecha_fin, maquina, modelo, marca, placa, trabajador, revisado_por,
                  cliente_proyecto, responsable_mantenimiento, estado, observaciones)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
-                datos["fecha_inicio"], datos["fecha_fin"],
+                datos["fecha_ini"], datos["fecha_fin"],
                 datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
@@ -288,13 +288,13 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 UPDATE inspecciones_preop SET
-                fecha_inicio=%s, fecha_fin=%s,
+                fecha_ini=%s, fecha_fin=%s,
                 maquina=%s, modelo=%s, marca=%s, placa=%s,
                 trabajador=%s, revisado_por=%s, cliente_proyecto=%s,
                 responsable_mantenimiento=%s, estado=%s, observaciones=%s
                 WHERE id=%s
             """, (
-                datos["fecha_inicio"], datos["fecha_fin"],
+                datos["fecha_ini"], datos["fecha_fin"],
                 datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
@@ -344,7 +344,7 @@ class DB:
             c = self.conn()
             q = """
                 SELECT id,
-                       fecha_inicio,
+                       fecha_ini,
                        fecha_fin,
                        maquina, modelo, marca, placa,
                        trabajador, revisado_por, cliente_proyecto,
@@ -354,7 +354,7 @@ class DB:
             """
             params = []
             if fecha_ini:
-                q += " AND fecha_inicio >= %s"; params.append(fecha_ini)
+                q += " AND fecha_ini >= %s"; params.append(fecha_ini)
             if fecha_fin:
                 q += " AND fecha_fin <= %s"; params.append(fecha_fin)
             if maquina and maquina != "Todas":
@@ -363,7 +363,7 @@ class DB:
                 q += " AND estado ILIKE %s"; params.append(f"%{estado}%")
             if trabajador:
                 q += " AND trabajador ILIKE %s"; params.append(f"%{trabajador}%")
-            q += " ORDER BY fecha_inicio DESC, id DESC"
+            q += " ORDER BY fecha_ini DESC, id DESC"
             return pd.read_sql(q, c, params=params)
         except Exception as e:
             st.error(f"Error consultando inspecciones: {e}")
@@ -412,18 +412,28 @@ class DB:
         try:
             c = self.conn()
             return pd.read_sql("""
-                SELECT i.id,
-                       i.fecha_inicio AS fecha,
-                       i.maquina, i.trabajador, i.estado,
-                       COUNT(CASE WHEN it.resultado = 'NC' THEN 1 END) as num_nc,
-                       COUNT(CASE WHEN it.resultado = 'C'  THEN 1 END) as num_c,
-                       COUNT(it.id) as total_items
-                FROM inspecciones_preop i
-                LEFT JOIN inspecciones_preop_items it ON it.inspeccion_id = i.id
-                WHERE i.fecha_inicio >= %s
-                  AND i.fecha_inicio <= %s
-                GROUP BY i.id, i.fecha_inicio, i.maquina, i.trabajador, i.estado
-                ORDER BY i.fecha_inicio
+                SELECT
+                    insp.id,
+                    insp.fecha_ini AS fecha,
+                    insp.maquina,
+                    insp.trabajador,
+                    insp.estado,
+                    COALESCE(stats.num_nc, 0)      AS num_nc,
+                    COALESCE(stats.num_c,  0)      AS num_c,
+                    COALESCE(stats.total_items, 0) AS total_items
+                FROM inspecciones_preop insp
+                LEFT JOIN (
+                    SELECT
+                        inspeccion_id,
+                        COUNT(*) FILTER (WHERE resultado = 'NC') AS num_nc,
+                        COUNT(*) FILTER (WHERE resultado = 'C')  AS num_c,
+                        COUNT(*)                                  AS total_items
+                    FROM inspecciones_preop_items
+                    GROUP BY inspeccion_id
+                ) stats ON stats.inspeccion_id = insp.id
+                WHERE insp.fecha_ini >= %s
+                  AND insp.fecha_ini <= %s
+                ORDER BY insp.fecha_ini
             """, c, params=[fecha_ini, fecha_fin])
         except Exception as e:
             st.error(f"Error en stats: {e}")
@@ -437,7 +447,7 @@ class DB:
             c = self.conn()
             cur = c.cursor()
             cur.execute(
-                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha_inicio=%s AND maquina=%s",
+                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha_ini=%s AND maquina=%s",
                 (fecha_inicio, maquina)
             )
             count = cur.fetchone()[0]
@@ -588,7 +598,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
 
     columnas = [
         ("id",                        "ID",            6),
-        ("fecha_inicio",              "F. INICIO",     12),
+        ("fecha_ini",                 "F. INICIO",     12),
         ("fecha_fin",                 "F. FIN",        12),
         ("maquina",                   "MÁQUINA",       20),
         ("modelo",                    "MODELO",        14),
@@ -621,12 +631,12 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         es_obs   = "Observaciones"  in estado_val
         fill_f   = fill_nc_row if es_rech else (fill_obs_row if es_obs else (fill_alt if row_idx % 2 == 0 else None))
 
-        fi_val = str(fila.get("fecha_inicio", ""))
+        fi_val = str(fila.get("fecha_ini", ""))
         ff_val = str(fila.get("fecha_fin",    ""))
 
         valores = {
             "id": insp_id,
-            "fecha_inicio": fi_val,
+            "fecha_ini": fi_val,
             "fecha_fin": ff_val,
             "maquina": fila.get("maquina",""), "modelo": fila.get("modelo",""),
             "marca": fila.get("marca",""), "placa": fila.get("placa",""),
@@ -641,7 +651,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
             val  = valores.get(key, "")
             cell = ws.cell(row=row_idx, column=col_idx, value=str(val) if val != "" else "")
             cell.border = borde
-            cell.alignment = centro if key in ("id","fecha_inicio","fecha_fin","estado","num_nc","num_c","placa") else izq
+            cell.alignment = centro if key in ("id","fecha_ini","fecha_fin","estado","num_nc","num_c","placa") else izq
             if key == "num_nc" and num_nc > 0:
                 cell.font = ft_nc
             elif key == "estado" and "Aprobada" in str(val):
@@ -686,7 +696,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         df_it   = items_por_id.get(insp_id, pd.DataFrame())
         if df_it.empty:
             continue
-        fi_v = str(insp.get("fecha_inicio", ""))
+        fi_v = str(insp.get("fecha_ini", ""))
         ff_v = str(insp.get("fecha_fin",    ""))
         for _, item in df_it.iterrows():
             res = str(item.get("resultado", "C"))
@@ -722,7 +732,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws3.row_dimensions[2].height = 24
 
     if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
-        fecha_col = "fecha_inicio"
+        fecha_col = "fecha_ini"
         resumen_maq = df_inspecciones.groupby("maquina", as_index=False).agg(
             total       =("maquina",  "count"),
             aprobadas   =("estado",   lambda x: x.str.contains("Aprobada",      na=False).sum()),
@@ -994,7 +1004,7 @@ def main():
                 else:
                     items_form = construir_items_semanal("new", dias_activos)
                     datos = {
-                        "fecha_inicio": fecha_ini_insp,
+                        "fecha_ini": fecha_ini_insp,
                         "fecha_fin":    fecha_fin_insp,
                         "maquina":      maquina_sel,
                         "modelo":       modelo_inp,
@@ -1064,7 +1074,7 @@ def main():
                 )
 
             st.divider()
-            cols_tabla = ["id","fecha_inicio","fecha_fin","maquina","trabajador","revisado_por",
+            cols_tabla = ["id","fecha_ini","fecha_fin","maquina","trabajador","revisado_por",
                           "cliente_proyecto","placa","estado","observaciones"]
             cols_ex = [c for c in cols_tabla if c in df_hist.columns]
             st.dataframe(df_hist[cols_ex], use_container_width=True, hide_index=True)
@@ -1073,8 +1083,8 @@ def main():
             st.subheader("✏️ Ver Detalle / Editar")
             df_hist["_label"] = df_hist.apply(
                 lambda r: (
-                    f"ID {r['id']} | {r.get('fecha_inicio', r.get('fecha',''))} → "
-                    f"{r.get('fecha_fin', r.get('fecha',''))} | {r['maquina']} | "
+                    f"ID {r['id']} | {r.get('fecha_ini', '')} → "
+                    f"{r.get('fecha_fin', '')} | {r['maquina']} | "
                     f"{r.get('trabajador','')} | {r.get('estado','')}"
                 ),
                 axis=1
@@ -1092,8 +1102,8 @@ def main():
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.info(f"**Máquina:** {row['maquina']}")
-                        fi_disp = row.get('fecha_inicio', row.get('fecha',''))
-                        ff_disp = row.get('fecha_fin',    row.get('fecha',''))
+                        fi_disp = row.get('fecha_ini', '')
+                        ff_disp = row.get('fecha_fin', '')
                         st.write(f"**Semana:** {fi_disp} → {ff_disp}")
                         st.write(f"**Modelo:** {row.get('modelo','')}")
                         st.write(f"**Marca:** {row.get('marca','')}")
@@ -1177,7 +1187,7 @@ def main():
                     st.markdown("<div class='seccion-titulo'>🏭 DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
                     ec1, ec2, ec3, ec4, ec5, ec6, ec7 = st.columns(7)
                     with ec1:
-                        fi_prev = row.get("fecha_inicio", date.today())
+                        fi_prev = row.get("fecha_ini", date.today())
                         e_fecha_ini = st.date_input("📅 Fecha Inicio", value=fi_prev, key=f"efi_{vid}")
                     with ec2:
                         ff_prev = row.get("fecha_fin", date.today())
@@ -1269,7 +1279,7 @@ def main():
                         else:
                             items_edit = construir_items_semanal(f"edit_{vid}", dias_activos_e)
                             datos_edit = {
-                                "fecha_inicio": e_fecha_ini, "fecha_fin": e_fecha_fin,
+                                "fecha_ini": e_fecha_ini, "fecha_fin": e_fecha_fin,
                                 "maquina": e_maq, "modelo": e_modelo,
                                 "marca": e_marca, "placa": e_placa,
                                 "trabajador": e_trab.strip(), "revisado_por": e_rev.strip(),
