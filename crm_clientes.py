@@ -173,34 +173,51 @@ class DB:
         try:
             c = self.conn()
             cur = c.cursor()
+
+            # ── Detectar columnas existentes ──────────────────────────────────
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS inspecciones_preop (
-                    id SERIAL PRIMARY KEY,
-                    fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
-                    fecha_inicio DATE NOT NULL,
-                    fecha_fin DATE NOT NULL,
-                    fecha DATE NOT NULL,
-                    maquina TEXT NOT NULL,
-                    modelo TEXT,
-                    marca TEXT,
-                    placa TEXT,
-                    trabajador TEXT NOT NULL,
-                    revisado_por TEXT NOT NULL,
-                    cliente_proyecto TEXT NOT NULL,
-                    responsable_mantenimiento TEXT NOT NULL,
-                    estado TEXT DEFAULT 'Aprobada',
-                    observaciones TEXT
-                )
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'inspecciones_preop'
             """)
-            # Migración suave: agregar columnas si no existen
-            for col_sql in [
-                "ALTER TABLE inspecciones_preop ADD COLUMN IF NOT EXISTS fecha_inicio DATE",
-                "ALTER TABLE inspecciones_preop ADD COLUMN IF NOT EXISTS fecha_fin DATE",
-            ]:
-                try:
-                    cur.execute(col_sql)
-                except Exception:
-                    pass
+            cols_existentes = {row[0] for row in cur.fetchall()}
+
+            if not cols_existentes:
+                # Tabla nueva: crear sin columna 'fecha'
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS inspecciones_preop (
+                        id SERIAL PRIMARY KEY,
+                        fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
+                        fecha_inicio DATE NOT NULL,
+                        fecha_fin DATE NOT NULL,
+                        maquina TEXT NOT NULL,
+                        modelo TEXT,
+                        marca TEXT,
+                        placa TEXT,
+                        trabajador TEXT NOT NULL,
+                        revisado_por TEXT NOT NULL,
+                        cliente_proyecto TEXT NOT NULL,
+                        responsable_mantenimiento TEXT NOT NULL,
+                        estado TEXT DEFAULT 'Aprobada',
+                        observaciones TEXT
+                    )
+                """)
+            else:
+                # Tabla existente: agregar columnas faltantes
+                if "fecha_inicio" not in cols_existentes:
+                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_inicio DATE")
+                    # Si existía 'fecha', copiar sus valores
+                    if "fecha" in cols_existentes:
+                        cur.execute("UPDATE inspecciones_preop SET fecha_inicio = fecha WHERE fecha_inicio IS NULL")
+                    else:
+                        cur.execute("UPDATE inspecciones_preop SET fecha_inicio = CURRENT_DATE WHERE fecha_inicio IS NULL")
+                if "fecha_fin" not in cols_existentes:
+                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_fin DATE")
+                    if "fecha" in cols_existentes:
+                        cur.execute("UPDATE inspecciones_preop SET fecha_fin = fecha WHERE fecha_fin IS NULL")
+                    else:
+                        cur.execute("UPDATE inspecciones_preop SET fecha_fin = CURRENT_DATE WHERE fecha_fin IS NULL")
+
+            # ── Tabla de ítems ────────────────────────────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS inspecciones_preop_items (
                     id SERIAL PRIMARY KEY,
@@ -212,11 +229,14 @@ class DB:
                     resultado TEXT DEFAULT 'C'
                 )
             """)
-            # Migración suave: agregar columna dia si no existe
-            try:
-                cur.execute("ALTER TABLE inspecciones_preop_items ADD COLUMN IF NOT EXISTS dia TEXT NOT NULL DEFAULT 'General'")
-            except Exception:
-                pass
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'inspecciones_preop_items'
+            """)
+            item_cols = {row[0] for row in cur.fetchall()}
+            if "dia" not in item_cols:
+                cur.execute("ALTER TABLE inspecciones_preop_items ADD COLUMN dia TEXT NOT NULL DEFAULT 'General'")
+
             c.commit()
             cur.close()
         except Exception as e:
@@ -231,13 +251,12 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 INSERT INTO inspecciones_preop
-                (fecha_inicio, fecha_fin, fecha, maquina, modelo, marca, placa, trabajador, revisado_por,
+                (fecha_inicio, fecha_fin, maquina, modelo, marca, placa, trabajador, revisado_por,
                  cliente_proyecto, responsable_mantenimiento, estado, observaciones)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
                 datos["fecha_inicio"], datos["fecha_fin"],
-                datos["fecha_inicio"],  # fecha = fecha_inicio para compatibilidad
                 datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
@@ -269,14 +288,13 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 UPDATE inspecciones_preop SET
-                fecha_inicio=%s, fecha_fin=%s, fecha=%s,
+                fecha_inicio=%s, fecha_fin=%s,
                 maquina=%s, modelo=%s, marca=%s, placa=%s,
                 trabajador=%s, revisado_por=%s, cliente_proyecto=%s,
                 responsable_mantenimiento=%s, estado=%s, observaciones=%s
                 WHERE id=%s
             """, (
                 datos["fecha_inicio"], datos["fecha_fin"],
-                datos["fecha_inicio"],
                 datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
@@ -326,9 +344,9 @@ class DB:
             c = self.conn()
             q = """
                 SELECT id,
-                       COALESCE(fecha_inicio, fecha) AS fecha_inicio,
-                       COALESCE(fecha_fin, fecha)    AS fecha_fin,
-                       fecha, maquina, modelo, marca, placa,
+                       fecha_inicio,
+                       fecha_fin,
+                       maquina, modelo, marca, placa,
                        trabajador, revisado_por, cliente_proyecto,
                        responsable_mantenimiento, estado, observaciones,
                        fecha_registro
@@ -336,16 +354,16 @@ class DB:
             """
             params = []
             if fecha_ini:
-                q += " AND COALESCE(fecha_inicio, fecha) >= %s"; params.append(fecha_ini)
+                q += " AND fecha_inicio >= %s"; params.append(fecha_ini)
             if fecha_fin:
-                q += " AND COALESCE(fecha_fin, fecha) <= %s"; params.append(fecha_fin)
+                q += " AND fecha_fin <= %s"; params.append(fecha_fin)
             if maquina and maquina != "Todas":
                 q += " AND maquina = %s"; params.append(maquina)
             if estado and estado != "Todos":
                 q += " AND estado ILIKE %s"; params.append(f"%{estado}%")
             if trabajador:
                 q += " AND trabajador ILIKE %s"; params.append(f"%{trabajador}%")
-            q += " ORDER BY COALESCE(fecha_inicio, fecha) DESC, id DESC"
+            q += " ORDER BY fecha_inicio DESC, id DESC"
             return pd.read_sql(q, c, params=params)
         except Exception as e:
             st.error(f"Error consultando inspecciones: {e}")
@@ -395,17 +413,17 @@ class DB:
             c = self.conn()
             return pd.read_sql("""
                 SELECT i.id,
-                       COALESCE(i.fecha_inicio, i.fecha) AS fecha,
+                       i.fecha_inicio AS fecha,
                        i.maquina, i.trabajador, i.estado,
                        COUNT(CASE WHEN it.resultado = 'NC' THEN 1 END) as num_nc,
                        COUNT(CASE WHEN it.resultado = 'C'  THEN 1 END) as num_c,
                        COUNT(it.id) as total_items
                 FROM inspecciones_preop i
                 LEFT JOIN inspecciones_preop_items it ON it.inspeccion_id = i.id
-                WHERE COALESCE(i.fecha_inicio, i.fecha) >= %s
-                  AND COALESCE(i.fecha_inicio, i.fecha) <= %s
-                GROUP BY i.id, fecha, i.maquina, i.trabajador, i.estado
-                ORDER BY fecha
+                WHERE i.fecha_inicio >= %s
+                  AND i.fecha_inicio <= %s
+                GROUP BY i.id, i.fecha_inicio, i.maquina, i.trabajador, i.estado
+                ORDER BY i.fecha_inicio
             """, c, params=[fecha_ini, fecha_fin])
         except Exception as e:
             st.error(f"Error en stats: {e}")
@@ -603,8 +621,8 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         es_obs   = "Observaciones"  in estado_val
         fill_f   = fill_nc_row if es_rech else (fill_obs_row if es_obs else (fill_alt if row_idx % 2 == 0 else None))
 
-        fi_val = str(fila.get("fecha_inicio", fila.get("fecha", "")))
-        ff_val = str(fila.get("fecha_fin",    fila.get("fecha", "")))
+        fi_val = str(fila.get("fecha_inicio", ""))
+        ff_val = str(fila.get("fecha_fin",    ""))
 
         valores = {
             "id": insp_id,
@@ -668,8 +686,8 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         df_it   = items_por_id.get(insp_id, pd.DataFrame())
         if df_it.empty:
             continue
-        fi_v = str(insp.get("fecha_inicio", insp.get("fecha", "")))
-        ff_v = str(insp.get("fecha_fin",    insp.get("fecha", "")))
+        fi_v = str(insp.get("fecha_inicio", ""))
+        ff_v = str(insp.get("fecha_fin",    ""))
         for _, item in df_it.iterrows():
             res = str(item.get("resultado", "C"))
             fill_item = PatternFill("solid", start_color="FADBD8") if res == "NC" else (
@@ -704,7 +722,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws3.row_dimensions[2].height = 24
 
     if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
-        fecha_col = "fecha_inicio" if "fecha_inicio" in df_inspecciones.columns else "fecha"
+        fecha_col = "fecha_inicio"
         resumen_maq = df_inspecciones.groupby("maquina", as_index=False).agg(
             total       =("maquina",  "count"),
             aprobadas   =("estado",   lambda x: x.str.contains("Aprobada",      na=False).sum()),
@@ -1159,10 +1177,10 @@ def main():
                     st.markdown("<div class='seccion-titulo'>🏭 DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
                     ec1, ec2, ec3, ec4, ec5, ec6, ec7 = st.columns(7)
                     with ec1:
-                        fi_prev = row.get("fecha_inicio", row.get("fecha", date.today()))
+                        fi_prev = row.get("fecha_inicio", date.today())
                         e_fecha_ini = st.date_input("📅 Fecha Inicio", value=fi_prev, key=f"efi_{vid}")
                     with ec2:
-                        ff_prev = row.get("fecha_fin", row.get("fecha", date.today()))
+                        ff_prev = row.get("fecha_fin", date.today())
                         e_fecha_fin = st.date_input("📅 Fecha Fin",   value=ff_prev, key=f"eff_{vid}")
                     with ec3:
                         maq_idx = MAQUINAS.index(row["maquina"]) if row["maquina"] in MAQUINAS else 0
