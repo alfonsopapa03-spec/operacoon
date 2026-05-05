@@ -1,1244 +1,1142 @@
-"""
-CRM de Clientes - Transporte de Carga
-Colombia - Conectado a Supabase (PostgreSQL)
-Módulos:
-  - Ficha completa de cada cliente
-  - Tarifas pactadas por ruta
-  - Contactos del cliente
-  - Notas y seguimiento comercial
-  - Exportación a Excel
-"""
-
 import streamlit as st
 import psycopg2
-from psycopg2 import pool
+from psycopg2 import pool as pg_pool
 import pandas as pd
 from datetime import datetime, timedelta, date
-from io import BytesIO
+import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import pytz
 
 # ==================== CONFIGURACIÓN ====================
-SUPABASE_DB_URL = "postgresql://postgres.xzbsbmovtbrolieebcpt:bp@t7UaEc#tZg%h@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+st.set_page_config(
+    page_title="Inspecciones Preoperacionales",
+    layout="wide",
+    page_icon="🔧",
+    initial_sidebar_state="collapsed"
+)
 
-# ==================== FORMATO COLOMBIANO ====================
-def fmt(valor):
-    if valor is None:
-        return "0"
-    try:
-        return f"{int(float(valor)):,}".replace(',', '.')
-    except:
-        return str(valor)
+# ==================== CREDENCIALES ====================
+# ⚠️ Recomendado: mover a st.secrets o variables de entorno en producción
+SUPABASE_DB_URL = "postgresql://postgres.ogfenizdijcboekqhuhd:Conejito200$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
-def limpiar(texto):
-    if not texto:
-        return 0.0
-    try:
-        return float(str(texto).replace('.', '').replace(',', '.'))
-    except:
-        return 0.0
+# ==================== CATÁLOGO DE MÁQUINAS ====================
+MAQUINAS = [
+    "Máquina 1", "Máquina 2", "Máquina 3", "Máquina 4", "Máquina 5",
+    "Máquina 6", "Máquina 7", "Máquina 8", "Máquina 9", "Máquina 10", "Máquina 11",
+]
 
-def hora_colombia():
-    return datetime.utcnow() - timedelta(hours=5)
+# ==================== ÍTEMS DE INSPECCIÓN ====================
+ITEMS_ANTES_USO = [
+    "¿Tiene permiso el trabajador para utilizar la máquina?",
+    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
+    "¿Se ha verificado que la presión del aire se encuentre en 125 PSI?",
+    "¿Se ha inspeccionado que los desviadores contengan material adecuadamente?",
+    "¿Se ha inspeccionado que los electro-válvulas funcionen adecuadamente?",
+    "¿Se ha comprobado que los ganchos de ajuste funcionen correctamente?",
+    "¿El 'carrusel' de fricción del material funciona satisfactoriamente?",
+    "¿Se ha verificado que el tope se encuentre en óptimas condiciones?",
+    "¿Se ha inspeccionado que los botones y controles funcionen oportunamente?",
+    "¿Las paradas de emergencia (6 en total) funcionan correctamente?",
+    "¿Se ha verificado el estado de los cabezales (inferior/superior)?",
+    "¿El nivel de aceite de lubricación se encuentra en nivel adecuado?",
+    "¿El manómetro de aceite de sobrecarga funciona correctamente?",
+    "¿Se ha ajustado la altura del panel a la medida correspondiente?",
+]
 
-def fmt_fecha(valor):
-    if valor is None:
-        return "—"
-    try:
-        if isinstance(valor, (date, datetime)):
-            return valor.strftime('%d/%m/%Y')
-        return pd.to_datetime(valor).strftime('%d/%m/%Y')
-    except:
-        return str(valor)[:10]
+ITEMS_EPP = [
+    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de incendios, instalaciones, otros trabajadores, etc.)",
+    "¿La iluminación del área de trabajo es adecuada para operación de la máquina sin riesgos?",
+    "¿Cuenta con los elementos de protección personal? (protector de ojos, oídos, guantes y cabezado)",
+    "¿El trabajador está vestido apropiadamente? (Camisa manga larga, pantalón de dotación y calzado de seguridad)",
+    "¿Se evidencia el NO uso de joyas, relojes y ropa holgada?",
+    "¿Se tiene el cabello recogido si lo tiene largo?",
+]
 
-# ==================== CONNECTION POOL ====================
-@st.cache_resource
-def get_pool():
-    return psycopg2.pool.ThreadedConnectionPool(
-        minconn=1, maxconn=5,
-        dsn=SUPABASE_DB_URL,
-        connect_timeout=10,
-        options="-c statement_timeout=15000"
-    )
+ITEMS_ELECTRICA = [
+    "¿Se ha verificado que el cable de alimentación está en buen estado?",
+    "¿Se ha revisado que el enchufe se encuentre en buenas condiciones?",
+    "¿El interruptor de encendido funciona correctamente?",
+]
 
-def get_conn():
-    return get_pool().getconn()
+TODOS_ITEMS = ITEMS_ANTES_USO + ITEMS_EPP + ITEMS_ELECTRICA
+OPCIONES_INSPECCION = ["C", "NC", "N/A"]
+ESTADOS_INSPECCION  = ["✅ Aprobada", "⚠️ Con Observaciones", "❌ Rechazada"]
 
-def put_conn(conn):
-    get_pool().putconn(conn)
+# ==================== CSS ====================
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700&family=Barlow:wght@300;400;500&display=swap');
+    html, body, [class*="css"] { font-family: 'Barlow', sans-serif; }
+    .main-header {
+        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+        padding: 1.5rem 2rem; border-radius: 12px; margin-bottom: 1.5rem;
+    }
+    .main-header h1 {
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 2rem; font-weight: 700; color: white; margin: 0; letter-spacing: 1px;
+    }
+    .main-header p { color: #a0c4d8; margin: 0; font-size: 0.9rem; }
+    .seccion-titulo {
+        background: #203a43; color: white; padding: 0.4rem 1rem;
+        border-radius: 6px; font-weight: 700; font-size: 0.95rem;
+        margin: 1rem 0 0.5rem 0; letter-spacing: 0.5px;
+    }
+    .item-label { font-size: 0.85rem; color: #333; padding: 0.3rem 0; }
+    .badge-c   { background: #2ecc71; color: white; border-radius: 4px; padding: 2px 8px; font-weight: 700; font-size: 0.8rem; }
+    .badge-nc  { background: #e74c3c; color: white; border-radius: 4px; padding: 2px 8px; font-weight: 700; font-size: 0.8rem; }
+    .badge-na  { background: #95a5a6; color: white; border-radius: 4px; padding: 2px 8px; font-weight: 700; font-size: 0.8rem; }
+    div[data-testid="stTabs"] button {
+        font-family: 'Barlow Condensed', sans-serif;
+        font-weight: 600; font-size: 1rem; letter-spacing: 0.5px;
+    }
+    .kpi-box {
+        background: white; border-radius: 10px; padding: 1rem 1.2rem;
+        border-left: 5px solid #2c5364; box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+        margin-bottom: 0.5rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ==================== BASE DE DATOS ====================
-class DB:
-    def _exec(self, query, params=None, fetch=None):
-        conn = get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute(query, params)
-            if fetch == "all":
-                return cur.fetchall(), [d[0] for d in cur.description]
-            elif fetch == "one":
-                return cur.fetchone()
-            else:
-                conn.commit()
-                return True
-        except Exception as e:
-            conn.rollback()
-            st.error(f"DB error: {e}")
-            return None
-        finally:
-            put_conn(conn)
-
-    def _query_df(self, query, params=None):
-        conn = get_conn()
-        try:
-            df = pd.read_sql_query(query, conn, params=params)
-            return df
-        except Exception as e:
-            st.error(f"DB query error: {e}")
-            return pd.DataFrame()
-        finally:
-            put_conn(conn)
-
-    def init_tablas(self):
-        conn = get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS crm_clientes (
-                    id SERIAL PRIMARY KEY,
-                    nombre TEXT UNIQUE NOT NULL,
-                    nit TEXT,
-                    direccion TEXT,
-                    ciudad TEXT,
-                    telefono TEXT,
-                    email TEXT,
-                    contacto_principal TEXT,
-                    condicion_pago TEXT DEFAULT '30 días',
-                    estado TEXT DEFAULT 'activo',
-                    categoria TEXT DEFAULT 'regular',
-                    observaciones TEXT,
-                    fecha_inicio_relacion DATE,
-                    fecha_registro TIMESTAMP NOT NULL
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS crm_contactos (
-                    id SERIAL PRIMARY KEY,
-                    cliente_id INTEGER NOT NULL REFERENCES crm_clientes(id) ON DELETE CASCADE,
-                    nombre TEXT NOT NULL,
-                    cargo TEXT,
-                    telefono TEXT,
-                    email TEXT,
-                    es_principal BOOLEAN DEFAULT FALSE,
-                    observaciones TEXT,
-                    fecha_registro TIMESTAMP NOT NULL
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS crm_tarifas (
-                    id SERIAL PRIMARY KEY,
-                    cliente_id INTEGER NOT NULL REFERENCES crm_clientes(id) ON DELETE CASCADE,
-                    origen TEXT NOT NULL,
-                    destino TEXT NOT NULL,
-                    tarifa BIGINT NOT NULL,
-                    tipo_vehiculo TEXT DEFAULT 'tractomula',
-                    vigente BOOLEAN DEFAULT TRUE,
-                    observaciones TEXT,
-                    fecha_desde DATE,
-                    fecha_hasta DATE,
-                    registrado_por TEXT,
-                    fecha_registro TIMESTAMP NOT NULL
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS crm_notas (
-                    id SERIAL PRIMARY KEY,
-                    cliente_id INTEGER NOT NULL REFERENCES crm_clientes(id) ON DELETE CASCADE,
-                    tipo TEXT DEFAULT 'nota',
-                    titulo TEXT NOT NULL,
-                    contenido TEXT NOT NULL,
-                    autor TEXT,
-                    fecha_seguimiento DATE,
-                    completada BOOLEAN DEFAULT FALSE,
-                    fecha_registro TIMESTAMP NOT NULL
-                )
-            """)
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error inicializando tablas CRM: {e}")
-        finally:
-            put_conn(conn)
-
-    # ---- Clientes ----
-    def obtener_clientes(self, estado=None, categoria=None, buscar=None):
-        q = "SELECT * FROM crm_clientes WHERE 1=1"
-        params = []
-        if estado and estado != "Todos":
-            q += " AND estado = %s"; params.append(estado.lower())
-        if categoria and categoria != "Todas":
-            q += " AND categoria = %s"; params.append(categoria.lower())
-        if buscar:
-            q += " AND (nombre ILIKE %s OR nit ILIKE %s OR ciudad ILIKE %s)"
-            params += [f"%{buscar}%", f"%{buscar}%", f"%{buscar}%"]
-        q += " ORDER BY nombre"
-        return self._query_df(q, params if params else None)
-
-    def obtener_cliente(self, cliente_id):
-        df = self._query_df("SELECT * FROM crm_clientes WHERE id = %s", (cliente_id,))
-        return df.iloc[0] if not df.empty else None
-
-    def crear_cliente(self, data):
-        conn = get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO crm_clientes
-                    (nombre, nit, direccion, ciudad, telefono, email,
-                     contacto_principal, condicion_pago, estado, categoria,
-                     observaciones, fecha_inicio_relacion, fecha_registro)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (
-                data['nombre'].strip().upper(),
-                data.get('nit','').strip(),
-                data.get('direccion','').strip(),
-                data.get('ciudad','').strip().upper(),
-                data.get('telefono','').strip(),
-                data.get('email','').strip().lower(),
-                data.get('contacto_principal','').strip(),
-                data.get('condicion_pago','30 días'),
-                data.get('estado','activo'),
-                data.get('categoria','regular'),
-                data.get('observaciones','').strip(),
-                data.get('fecha_inicio_relacion'),
-                hora_colombia()
-            ))
-            nuevo_id = cur.fetchone()[0]
-            conn.commit()
-            return nuevo_id
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error creando cliente: {e}")
-            return None
-        finally:
-            put_conn(conn)
-
-    def actualizar_cliente(self, cliente_id, data):
-        return bool(self._exec("""
-            UPDATE crm_clientes SET
-                nombre=%s, nit=%s, direccion=%s, ciudad=%s, telefono=%s,
-                email=%s, contacto_principal=%s, condicion_pago=%s,
-                estado=%s, categoria=%s, observaciones=%s, fecha_inicio_relacion=%s
-            WHERE id=%s
-        """, (
-            data['nombre'].strip().upper(),
-            data.get('nit','').strip(),
-            data.get('direccion','').strip(),
-            data.get('ciudad','').strip().upper(),
-            data.get('telefono','').strip(),
-            data.get('email','').strip().lower(),
-            data.get('contacto_principal','').strip(),
-            data.get('condicion_pago','30 días'),
-            data.get('estado','activo'),
-            data.get('categoria','regular'),
-            data.get('observaciones','').strip(),
-            data.get('fecha_inicio_relacion'),
-            cliente_id
-        )))
-
-    def eliminar_cliente(self, cliente_id):
-        self._exec("DELETE FROM crm_clientes WHERE id = %s", (cliente_id,))
-
-    # ---- Contactos ----
-    def obtener_contactos(self, cliente_id):
-        return self._query_df(
-            "SELECT * FROM crm_contactos WHERE cliente_id = %s ORDER BY es_principal DESC, nombre",
-            (cliente_id,)
+@st.cache_resource
+def get_pool():
+    """
+    Crea el pool de conexiones UNA sola vez para toda la sesión de Streamlit.
+    sslmode='require' es obligatorio para Supabase Cloud.
+    """
+    try:
+        connection_pool = pg_pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=5,
+            dsn=SUPABASE_DB_URL,
+            sslmode="require",
+            connect_timeout=15,
+            options="-c statement_timeout=30000"
         )
+        return connection_pool
+    except Exception as e:
+        st.error(f"❌ No se pudo conectar a la base de datos: {e}")
+        st.stop()
 
-    def crear_contacto(self, data):
-        conn = get_conn()
+
+class DB:
+    def __init__(self):
+        self.pool = get_pool()
+        self.init()
+
+    def conn(self):
+        """Obtiene una conexión del pool con reconexión automática."""
         try:
-            cur = conn.cursor()
-            if data.get('es_principal'):
-                cur.execute(
-                    "UPDATE crm_contactos SET es_principal=FALSE WHERE cliente_id=%s",
-                    (data['cliente_id'],)
+            c = self.pool.getconn()
+            # Verificar que la conexión sigue activa
+            c.cursor().execute("SELECT 1")
+            return c
+        except Exception:
+            # La conexión estaba muerta: crear una nueva directamente
+            try:
+                return psycopg2.connect(
+                    dsn=SUPABASE_DB_URL,
+                    sslmode="require",
+                    connect_timeout=15,
                 )
-            cur.execute("""
-                INSERT INTO crm_contactos
-                    (cliente_id, nombre, cargo, telefono, email, es_principal, observaciones, fecha_registro)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (
-                data['cliente_id'],
-                data['nombre'].strip(),
-                data.get('cargo','').strip(),
-                data.get('telefono','').strip(),
-                data.get('email','').strip().lower(),
-                bool(data.get('es_principal', False)),
-                data.get('observaciones','').strip(),
-                hora_colombia()
-            ))
-            nuevo_id = cur.fetchone()[0]
-            conn.commit()
-            return nuevo_id
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error creando contacto: {e}")
-            return None
-        finally:
-            put_conn(conn)
+            except Exception as e:
+                st.error(f"❌ Error de conexión: {e}")
+                st.stop()
 
-    def eliminar_contacto(self, contacto_id):
-        self._exec("DELETE FROM crm_contactos WHERE id = %s", (contacto_id,))
-
-    # ---- Tarifas ----
-    def obtener_tarifas(self, cliente_id, solo_vigentes=False):
-        q = "SELECT * FROM crm_tarifas WHERE cliente_id = %s"
-        params = [cliente_id]
-        if solo_vigentes:
-            q += " AND vigente = TRUE"
-        q += " ORDER BY origen, destino"
-        return self._query_df(q, params)
-
-    def crear_tarifa(self, data):
-        conn = get_conn()
+    def release(self, c):
+        """Devuelve la conexión al pool de forma segura."""
         try:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO crm_tarifas
-                    (cliente_id, origen, destino, tarifa, tipo_vehiculo,
-                     vigente, observaciones, fecha_desde, fecha_hasta,
-                     registrado_por, fecha_registro)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (
-                data['cliente_id'],
-                data['origen'].strip().upper(),
-                data['destino'].strip().upper(),
-                int(data['tarifa']),
-                data.get('tipo_vehiculo','tractomula'),
-                bool(data.get('vigente', True)),
-                data.get('observaciones','').strip(),
-                data.get('fecha_desde'),
-                data.get('fecha_hasta'),
-                data.get('registrado_por','').strip().upper(),
-                hora_colombia()
-            ))
-            nuevo_id = cur.fetchone()[0]
-            conn.commit()
-            return nuevo_id
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error creando tarifa: {e}")
-            return None
-        finally:
-            put_conn(conn)
+            if c and not c.closed:
+                self.pool.putconn(c)
+        except Exception:
+            pass
 
-    def actualizar_tarifa(self, tarifa_id, data):
-        return bool(self._exec("""
-            UPDATE crm_tarifas SET
-                origen=%s, destino=%s, tarifa=%s, tipo_vehiculo=%s,
-                vigente=%s, observaciones=%s, fecha_desde=%s, fecha_hasta=%s
-            WHERE id=%s
-        """, (
-            data['origen'].strip().upper(),
-            data['destino'].strip().upper(),
-            int(data['tarifa']),
-            data.get('tipo_vehiculo','tractomula'),
-            bool(data.get('vigente', True)),
-            data.get('observaciones','').strip(),
-            data.get('fecha_desde'),
-            data.get('fecha_hasta'),
-            tarifa_id
-        )))
-
-    def eliminar_tarifa(self, tarifa_id):
-        self._exec("DELETE FROM crm_tarifas WHERE id = %s", (tarifa_id,))
-
-    # ---- Notas / Seguimiento ----
-    def obtener_notas(self, cliente_id=None, pendientes=False):
-        q = "SELECT n.*, c.nombre as cliente_nombre FROM crm_notas n JOIN crm_clientes c ON c.id = n.cliente_id WHERE 1=1"
-        params = []
-        if cliente_id:
-            q += " AND n.cliente_id = %s"; params.append(cliente_id)
-        if pendientes:
-            q += " AND n.completada = FALSE AND n.fecha_seguimiento IS NOT NULL"
-        q += " ORDER BY n.fecha_registro DESC"
-        return self._query_df(q, params if params else None)
-
-    def crear_nota(self, data):
-        conn = get_conn()
+    def init(self):
+        c = None
         try:
-            cur = conn.cursor()
+            c = self.conn()
+            cur = c.cursor()
             cur.execute("""
-                INSERT INTO crm_notas
-                    (cliente_id, tipo, titulo, contenido, autor,
-                     fecha_seguimiento, completada, fecha_registro)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (
-                data['cliente_id'],
-                data.get('tipo','nota'),
-                data['titulo'].strip(),
-                data['contenido'].strip(),
-                data.get('autor','').strip().upper(),
-                data.get('fecha_seguimiento'),
-                False,
-                hora_colombia()
-            ))
-            nuevo_id = cur.fetchone()[0]
-            conn.commit()
-            return nuevo_id
+                CREATE TABLE IF NOT EXISTS inspecciones_preop (
+                    id SERIAL PRIMARY KEY,
+                    fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
+                    fecha DATE NOT NULL,
+                    maquina TEXT NOT NULL,
+                    modelo TEXT,
+                    marca TEXT,
+                    placa TEXT,
+                    trabajador TEXT,
+                    revisado_por TEXT,
+                    cliente_proyecto TEXT,
+                    responsable_mantenimiento TEXT,
+                    estado TEXT DEFAULT 'Aprobada',
+                    observaciones TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS inspecciones_preop_items (
+                    id SERIAL PRIMARY KEY,
+                    inspeccion_id INTEGER REFERENCES inspecciones_preop(id) ON DELETE CASCADE,
+                    seccion TEXT NOT NULL,
+                    item_numero INTEGER NOT NULL,
+                    descripcion TEXT NOT NULL,
+                    resultado TEXT DEFAULT 'C'
+                )
+            """)
+            c.commit()
+            cur.close()
         except Exception as e:
-            conn.rollback()
-            st.error(f"Error creando nota: {e}")
-            return None
+            st.error(f"Error inicializando DB: {e}")
         finally:
-            put_conn(conn)
+            self.release(c)
 
-    def marcar_nota_completada(self, nota_id, completada=True):
-        self._exec("UPDATE crm_notas SET completada=%s WHERE id=%s", (completada, nota_id))
+    def guardar_inspeccion(self, datos: dict, items: list) -> bool:
+        c = None
+        try:
+            c = self.conn()
+            cur = c.cursor()
+            cur.execute("""
+                INSERT INTO inspecciones_preop
+                (fecha, maquina, modelo, marca, placa, trabajador, revisado_por,
+                 cliente_proyecto, responsable_mantenimiento, estado, observaciones)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+            """, (
+                datos["fecha"], datos["maquina"], datos["modelo"], datos["marca"],
+                datos["placa"], datos["trabajador"], datos["revisado_por"],
+                datos["cliente_proyecto"], datos["responsable_mantenimiento"],
+                datos["estado"], datos["observaciones"],
+            ))
+            inspeccion_id = cur.fetchone()[0]
+            for item in items:
+                cur.execute("""
+                    INSERT INTO inspecciones_preop_items
+                    (inspeccion_id, seccion, item_numero, descripcion, resultado)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (
+                    inspeccion_id, item["seccion"], item["item_numero"],
+                    item["descripcion"], item["resultado"]
+                ))
+            c.commit()
+            cur.close()
+            return True
+        except Exception as e:
+            st.error(f"Error guardando: {e}")
+            return False
+        finally:
+            self.release(c)
 
-    def eliminar_nota(self, nota_id):
-        self._exec("DELETE FROM crm_notas WHERE id = %s", (nota_id,))
+    def actualizar_inspeccion(self, inspeccion_id: int, datos: dict, items: list) -> bool:
+        c = None
+        try:
+            c = self.conn()
+            cur = c.cursor()
+            cur.execute("""
+                UPDATE inspecciones_preop SET
+                fecha=%s, maquina=%s, modelo=%s, marca=%s, placa=%s,
+                trabajador=%s, revisado_por=%s, cliente_proyecto=%s,
+                responsable_mantenimiento=%s, estado=%s, observaciones=%s
+                WHERE id=%s
+            """, (
+                datos["fecha"], datos["maquina"], datos["modelo"], datos["marca"],
+                datos["placa"], datos["trabajador"], datos["revisado_por"],
+                datos["cliente_proyecto"], datos["responsable_mantenimiento"],
+                datos["estado"], datos["observaciones"], inspeccion_id
+            ))
+            cur.execute(
+                "DELETE FROM inspecciones_preop_items WHERE inspeccion_id=%s",
+                (inspeccion_id,)
+            )
+            for item in items:
+                cur.execute("""
+                    INSERT INTO inspecciones_preop_items
+                    (inspeccion_id, seccion, item_numero, descripcion, resultado)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (
+                    inspeccion_id, item["seccion"], item["item_numero"],
+                    item["descripcion"], item["resultado"]
+                ))
+            c.commit()
+            cur.close()
+            return True
+        except Exception as e:
+            st.error(f"Error actualizando: {e}")
+            return False
+        finally:
+            self.release(c)
 
-    # ---- Resumen clientes (sin anticipos) ----
-    def obtener_resumen_clientes(self):
-        df_clientes = self.obtener_clientes()
-        if df_clientes.empty:
+    def eliminar_inspeccion(self, inspeccion_id: int) -> bool:
+        c = None
+        try:
+            c = self.conn()
+            cur = c.cursor()
+            cur.execute("DELETE FROM inspecciones_preop WHERE id=%s", (inspeccion_id,))
+            c.commit()
+            cur.close()
+            return True
+        except Exception as e:
+            st.error(f"Error eliminando: {e}")
+            return False
+        finally:
+            self.release(c)
+
+    def obtener_inspecciones(self, fecha_ini=None, fecha_fin=None,
+                              maquina=None, estado=None, trabajador=None) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            q = """
+                SELECT id, fecha, maquina, modelo, marca, placa,
+                       trabajador, revisado_por, cliente_proyecto,
+                       responsable_mantenimiento, estado, observaciones,
+                       fecha_registro
+                FROM inspecciones_preop WHERE 1=1
+            """
+            params = []
+            if fecha_ini:
+                q += " AND fecha >= %s"; params.append(fecha_ini)
+            if fecha_fin:
+                q += " AND fecha <= %s"; params.append(fecha_fin)
+            if maquina and maquina != "Todas":
+                q += " AND maquina = %s"; params.append(maquina)
+            if estado and estado != "Todos":
+                q += " AND estado ILIKE %s"; params.append(f"%{estado}%")
+            if trabajador:
+                q += " AND trabajador ILIKE %s"; params.append(f"%{trabajador}%")
+            q += " ORDER BY fecha DESC, id DESC"
+            return pd.read_sql(q, c, params=params)
+        except Exception as e:
+            st.error(f"Error consultando inspecciones: {e}")
             return pd.DataFrame()
-        resultados = []
-        for _, c in df_clientes.iterrows():
-            resultados.append({
-                'id': c['id'],
-                'nombre': c['nombre'],
-                'ciudad': c.get('ciudad',''),
-                'categoria': c.get('categoria',''),
-                'estado': c.get('estado',''),
-                'condicion_pago': c.get('condicion_pago',''),
-                'contacto_principal': c.get('contacto_principal',''),
-                'telefono': c.get('telefono',''),
-                'fecha_inicio_relacion': c.get('fecha_inicio_relacion'),
-            })
-        return pd.DataFrame(resultados)
+        finally:
+            self.release(c)
 
+    def obtener_items_inspeccion(self, inspeccion_id: int) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT seccion, item_numero, descripcion, resultado
+                FROM inspecciones_preop_items
+                WHERE inspeccion_id = %s
+                ORDER BY seccion, item_numero
+            """, c, params=[inspeccion_id])
+        except Exception as e:
+            st.error(f"Error obteniendo ítems: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
 
-# ==================== EXCEL EXPORT ====================
-def generar_excel_crm(db) -> BytesIO:
-    wb = Workbook()
-    color_h = "1F4E79"
-    fh = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    fn = Font(name="Arial", size=9)
-    ft = Font(name="Arial", bold=True, size=13, color="1F4E79")
-    thin = Side(style="thin", color="BDBDBD")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    center = Alignment(horizontal="center", vertical="center")
-    left_a = Alignment(horizontal="left", vertical="center")
+    def obtener_todos_los_items(self, ids: list) -> pd.DataFrame:
+        """Una sola query para obtener items de múltiples inspecciones (para Excel)."""
+        if not ids:
+            return pd.DataFrame()
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT inspeccion_id, seccion, item_numero, descripcion, resultado
+                FROM inspecciones_preop_items
+                WHERE inspeccion_id = ANY(%s)
+                ORDER BY inspeccion_id, seccion, item_numero
+            """, c, params=[ids])
+        except Exception as e:
+            st.error(f"Error obteniendo todos los ítems: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
 
-    ws1 = wb.active
-    ws1.title = "Clientes"
-    ws1.merge_cells("A1:L1")
-    ws1["A1"] = f"CRM Clientes — {hora_colombia().strftime('%d/%m/%Y %H:%M')}"
-    ws1["A1"].font = ft
-    ws1["A1"].alignment = center
+    def stats_dashboard(self, fecha_ini, fecha_fin) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT i.id, i.fecha, i.maquina, i.trabajador, i.estado,
+                       COUNT(CASE WHEN it.resultado = 'NC' THEN 1 END) as num_nc,
+                       COUNT(CASE WHEN it.resultado = 'C'  THEN 1 END) as num_c,
+                       COUNT(it.id) as total_items
+                FROM inspecciones_preop i
+                LEFT JOIN inspecciones_preop_items it ON it.inspeccion_id = i.id
+                WHERE i.fecha >= %s AND i.fecha <= %s
+                GROUP BY i.id, i.fecha, i.maquina, i.trabajador, i.estado
+                ORDER BY i.fecha
+            """, c, params=[fecha_ini, fecha_fin])
+        except Exception as e:
+            st.error(f"Error en stats: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
 
-    cols1 = ["ID","Nombre","NIT","Ciudad","Teléfono","Email","Contacto principal",
-             "Condición pago","Categoría","Estado","Observaciones","Fecha inicio"]
-    rh = 3
-    for ci, cn in enumerate(cols1, 1):
-        cell = ws1.cell(row=rh, column=ci, value=cn)
-        cell.font = fh
-        cell.fill = PatternFill("solid", fgColor=color_h)
-        cell.alignment = center
-        cell.border = border
-
-    df_clientes_full = db.obtener_clientes()
-    for ri, (_, row) in enumerate(df_clientes_full.iterrows(), start=rh+1):
-        color_fila = "E8F5E9" if row.get('estado') == 'activo' else "F3F3F3"
-        fill = PatternFill("solid", fgColor=color_fila)
-        valores = [
-            row['id'], row['nombre'], row.get('nit',''),
-            row.get('ciudad',''), row.get('telefono',''), row.get('email',''),
-            row.get('contacto_principal',''), row.get('condicion_pago',''),
-            row.get('categoria',''), row.get('estado',''),
-            row.get('observaciones',''),
-            str(row.get('fecha_inicio_relacion',''))[:10],
-        ]
-        for ci, val in enumerate(valores, 1):
-            cell = ws1.cell(row=ri, column=ci, value=val)
-            cell.fill = fill; cell.border = border; cell.font = fn
-            cell.alignment = center if ci in [1,8,9,10] else left_a
-
-    anchos1 = [6,28,14,16,14,24,22,14,12,10,28,14]
-    for ci, aw in enumerate(anchos1, 1):
-        ws1.column_dimensions[get_column_letter(ci)].width = aw
-    ws1.freeze_panes = f"A{rh+1}"
-
-    ws2 = wb.create_sheet("Tarifas")
-    ws2.merge_cells("A1:I1")
-    ws2["A1"] = "Tarifas pactadas por cliente y ruta"
-    ws2["A1"].font = ft; ws2["A1"].alignment = center
-    cols2 = ["Cliente","Origen","Destino","Tarifa (COP)","Tipo vehículo","Vigente","Desde","Hasta","Registrado por"]
-    for ci, cn in enumerate(cols2, 1):
-        cell = ws2.cell(row=3, column=ci, value=cn)
-        cell.font = fh; cell.fill = PatternFill("solid", fgColor=color_h)
-        cell.alignment = center; cell.border = border
-
-    ri2 = 4
-    for _, c in df_clientes_full.iterrows():
-        df_tar = db.obtener_tarifas(c['id'])
-        for _, t in df_tar.iterrows():
-            color_t = "E3F2FD" if t.get('vigente') else "F3F3F3"
-            fill2 = PatternFill("solid", fgColor=color_t)
-            vals2 = [
-                c['nombre'], t['origen'], t['destino'],
-                int(t['tarifa']), t.get('tipo_vehiculo',''),
-                "Sí" if t.get('vigente') else "No",
-                str(t.get('fecha_desde',''))[:10],
-                str(t.get('fecha_hasta',''))[:10],
-                t.get('registrado_por',''),
-            ]
-            for ci, val in enumerate(vals2, 1):
-                cell = ws2.cell(row=ri2, column=ci, value=val)
-                cell.fill = fill2; cell.border = border; cell.font = fn
-                cell.alignment = center if ci in [4,6] else left_a
-                if ci == 4: cell.number_format = '#,##0'
-            ri2 += 1
-
-    anchos2 = [28,18,18,18,14,8,12,12,20]
-    for ci, aw in enumerate(anchos2, 1):
-        ws2.column_dimensions[get_column_letter(ci)].width = aw
-    ws2.freeze_panes = "A4"
-
-    output = BytesIO(); wb.save(output); output.seek(0)
-    return output
+    def verificar_inspeccion_existente(self, fecha, maquina) -> bool:
+        c = None
+        try:
+            c = self.conn()
+            cur = c.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha=%s AND maquina=%s",
+                (fecha, maquina)
+            )
+            count = cur.fetchone()[0]
+            cur.close()
+            return count > 0
+        except Exception:
+            return False
+        finally:
+            self.release(c)
 
 
 # ==================== HELPERS ====================
-CATEGORIAS = ["regular", "preferencial", "potencial", "inactivo"]
-CONDICIONES_PAGO = ["contado", "8 días", "15 días", "30 días", "45 días", "60 días"]
-TIPOS_NOTA = ["nota", "llamada", "reunión", "correo", "seguimiento", "queja", "oportunidad"]
-TIPOS_VEHICULO = ["tractomula", "camión", "furgón", "minimula"]
+def construir_items(prefix: str) -> list:
+    items = []
+    for i, desc in enumerate(ITEMS_ANTES_USO):
+        key = f"{prefix}_au_{i}"
+        resultado = st.session_state.get(key, "C")
+        items.append({"seccion": "ANTES DE SU USO", "item_numero": i + 1,
+                       "descripcion": desc, "resultado": resultado})
+    for i, desc in enumerate(ITEMS_EPP):
+        key = f"{prefix}_epp_{i}"
+        resultado = st.session_state.get(key, "C")
+        items.append({"seccion": "ELEMENTOS DE PROTECCIÓN PERSONAL", "item_numero": i + 1,
+                       "descripcion": desc, "resultado": resultado})
+    for i, desc in enumerate(ITEMS_ELECTRICA):
+        key = f"{prefix}_elec_{i}"
+        resultado = st.session_state.get(key, "C")
+        items.append({"seccion": "SEGURIDAD ELÉCTRICA", "item_numero": i + 1,
+                       "descripcion": desc, "resultado": resultado})
+    return items
 
 
-def badge_categoria(cat):
-    colores = {
-        "preferencial": "🔵",
-        "regular":      "🟢",
-        "potencial":    "🟡",
-        "inactivo":     "⚫",
-    }
-    return colores.get(cat, "⚪") + " " + cat.capitalize()
-
-def badge_tipo_nota(tipo):
-    iconos = {
-        "nota": "📝", "llamada": "📞", "reunión": "🤝",
-        "correo": "📧", "seguimiento": "🔔",
-        "queja": "⚠️", "oportunidad": "💡",
-    }
-    return iconos.get(tipo, "📌") + " " + tipo.capitalize()
+def badge_resultado(val):
+    if val == "C":   return "🟢 C"
+    if val == "NC":  return "🔴 NC"
+    return "⚪ N/A"
 
 
-# ==================== APP PRINCIPAL ====================
+def render_items_seccion(seccion_label: str, items_lista: list, prefix: str, sufijo: str,
+                          valores_previos: dict = None):
+    st.markdown(f"<div class='seccion-titulo'>📋 {seccion_label}</div>", unsafe_allow_html=True)
+    for i, desc in enumerate(items_lista):
+        key  = f"{prefix}_{sufijo}_{i}"
+        prev = valores_previos.get(key, "C") if valores_previos else "C"
+        cols = st.columns([0.85, 0.15])
+        with cols[0]:
+            st.markdown(f"<div class='item-label'>{i+1}. {desc}</div>", unsafe_allow_html=True)
+        with cols[1]:
+            st.selectbox(
+                "Resultado", OPCIONES_INSPECCION,
+                index=OPCIONES_INSPECCION.index(prev) if prev in OPCIONES_INSPECCION else 0,
+                key=key, label_visibility="collapsed"
+            )
+
+
+# ==================== EXCEL ====================
+def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspecciones Preoperacionales") -> bytes:
+    wb = Workbook()
+
+    ft_titulo = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
+    ft_header = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    ft_normal = Font(name="Calibri", size=9)
+    ft_total  = Font(name="Calibri", bold=True, size=10)
+    ft_nc     = Font(name="Calibri", size=9, color="C0392B", bold=True)
+    ft_apro   = Font(name="Calibri", size=9, color="1E8449")
+
+    fill_titulo  = PatternFill("solid", start_color="0F2027")
+    fill_header  = PatternFill("solid", start_color="203A43")
+    fill_alt     = PatternFill("solid", start_color="EBF5FB")
+    fill_total   = PatternFill("solid", start_color="D5DBDB")
+    fill_nc_row  = PatternFill("solid", start_color="FADBD8")
+    fill_obs_row = PatternFill("solid", start_color="FDEBD0")
+
+    borde  = Border(left=Side(style="thin"), right=Side(style="thin"),
+                    top=Side(style="thin"),  bottom=Side(style="thin"))
+    centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    izq    = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    now_col = datetime.now(pytz.timezone("America/Bogota"))
+
+    # ── Una sola query para TODOS los items (eficiente) ──────────────────────
+    ids_list = df_inspecciones["id"].astype(int).tolist()
+    df_all_items = db.obtener_todos_los_items(ids_list)
+    items_por_id = {}
+    if not df_all_items.empty:
+        for insp_id, grp in df_all_items.groupby("inspeccion_id"):
+            items_por_id[int(insp_id)] = grp
+
+    # =========================================================================
+    # HOJA 1 – RESUMEN INSPECCIONES
+    # =========================================================================
+    ws = wb.active
+    ws.title = "Inspecciones"
+    total_cols = 14
+
+    ws.merge_cells(f"A1:{get_column_letter(total_cols)}1")
+    ws["A1"] = f"🔧 {titulo}   |   Generado: {now_col.strftime('%d/%m/%Y %H:%M')} (COL)   |   Total: {len(df_inspecciones)} inspecciones"
+    ws["A1"].font      = ft_titulo
+    ws["A1"].fill      = fill_titulo
+    ws["A1"].alignment = centro
+    ws.row_dimensions[1].height = 30
+
+    columnas = [
+        ("id",                        "ID",            6),
+        ("fecha",                     "FECHA",         12),
+        ("maquina",                   "MÁQUINA",       20),
+        ("modelo",                    "MODELO",        14),
+        ("marca",                     "MARCA",         14),
+        ("placa",                     "PLACA",         12),
+        ("trabajador",                "TRABAJADOR",    24),
+        ("revisado_por",              "REVISADO POR",  24),
+        ("cliente_proyecto",          "CLIENTE/PROY.", 20),
+        ("responsable_mantenimiento", "RESP. MANT.",   24),
+        ("estado",                    "ESTADO",        18),
+        ("num_nc",                    "# NC",           7),
+        ("num_c",                     "# C",            7),
+        ("observaciones",             "OBSERVACIONES", 32),
+    ]
+
+    for idx, (key, nombre, ancho) in enumerate(columnas, start=1):
+        cell = ws.cell(row=2, column=idx, value=nombre)
+        cell.font = ft_header; cell.fill = fill_header
+        cell.alignment = centro; cell.border = borde
+        ws.column_dimensions[get_column_letter(idx)].width = ancho
+    ws.row_dimensions[2].height = 28
+
+    for row_idx, (_, fila) in enumerate(df_inspecciones.iterrows(), start=3):
+        insp_id  = int(fila["id"])
+        df_it    = items_por_id.get(insp_id, pd.DataFrame())
+        num_nc   = len(df_it[df_it["resultado"] == "NC"]) if not df_it.empty else 0
+        num_c    = len(df_it[df_it["resultado"] == "C"])  if not df_it.empty else 0
+        estado_val = str(fila.get("estado", ""))
+        es_rech  = "Rechazada"      in estado_val
+        es_obs   = "Observaciones"  in estado_val
+        fill_f   = fill_nc_row if es_rech else (fill_obs_row if es_obs else (fill_alt if row_idx % 2 == 0 else None))
+
+        valores = {
+            "id": insp_id, "fecha": str(fila.get("fecha","")),
+            "maquina": fila.get("maquina",""), "modelo": fila.get("modelo",""),
+            "marca": fila.get("marca",""), "placa": fila.get("placa",""),
+            "trabajador": fila.get("trabajador",""), "revisado_por": fila.get("revisado_por",""),
+            "cliente_proyecto": fila.get("cliente_proyecto",""),
+            "responsable_mantenimiento": fila.get("responsable_mantenimiento",""),
+            "estado": estado_val, "num_nc": num_nc, "num_c": num_c,
+            "observaciones": fila.get("observaciones",""),
+        }
+
+        for col_idx, (key, _, _) in enumerate(columnas, start=1):
+            val  = valores.get(key, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=str(val) if val != "" else "")
+            cell.border = borde
+            cell.alignment = centro if key in ("id","fecha","estado","num_nc","num_c","placa") else izq
+            if key == "num_nc" and num_nc > 0:
+                cell.font = ft_nc
+            elif key == "estado" and "Aprobada" in str(val):
+                cell.font = ft_apro
+            else:
+                cell.font = ft_normal
+            if fill_f:
+                cell.fill = fill_f
+        ws.row_dimensions[row_idx].height = 18
+
+    aprobadas = len(df_inspecciones[df_inspecciones["estado"].str.contains("Aprobada",      na=False)])
+    obs_count = len(df_inspecciones[df_inspecciones["estado"].str.contains("Observaciones", na=False)])
+    rech      = len(df_inspecciones[df_inspecciones["estado"].str.contains("Rechazada",     na=False)])
+    total_row = len(df_inspecciones) + 3
+    try:
+        ws.merge_cells(f"A{total_row}:{get_column_letter(total_cols)}{total_row}")
+    except Exception:
+        pass
+    ct = ws.cell(row=total_row, column=1,
+                 value=f"TOTAL: {len(df_inspecciones)}   |   ✅ Aprobadas: {aprobadas}   ⚠️ Con Obs: {obs_count}   ❌ Rechazadas: {rech}")
+    ct.font = ft_total; ct.fill = fill_total; ct.alignment = centro
+    ws.freeze_panes = "A3"
+
+    # =========================================================================
+    # HOJA 2 – DETALLE ÍTEMS
+    # =========================================================================
+    ws2 = wb.create_sheet("Detalle Ítems")
+    ws2.merge_cells("A1:G1")
+    ws2["A1"] = "Detalle de Ítems por Inspección"
+    ws2["A1"].font = ft_titulo; ws2["A1"].fill = fill_titulo; ws2["A1"].alignment = centro
+    ws2.row_dimensions[1].height = 26
+
+    hdrs2   = ["ID INSP.", "FECHA", "MÁQUINA", "SECCIÓN", "N°", "DESCRIPCIÓN DEL ÍTEM", "RESULTADO"]
+    anchos2 = [8, 12, 20, 30, 5, 70, 10]
+    for ci, (h, w) in enumerate(zip(hdrs2, anchos2), start=1):
+        c = ws2.cell(2, ci, h)
+        c.font = ft_header; c.fill = fill_header; c.alignment = centro; c.border = borde
+        ws2.column_dimensions[get_column_letter(ci)].width = w
+    ws2.row_dimensions[2].height = 24
+
+    fila2 = 3
+    for _, insp in df_inspecciones.iterrows():
+        insp_id = int(insp["id"])
+        df_it   = items_por_id.get(insp_id, pd.DataFrame())
+        if df_it.empty:
+            continue
+        for _, item in df_it.iterrows():
+            res = str(item.get("resultado", "C"))
+            fill_item = PatternFill("solid", start_color="FADBD8") if res == "NC" else (
+                        PatternFill("solid", start_color="EBF5FB") if fila2 % 2 == 0 else None)
+            vals = [insp_id, str(insp.get("fecha","")), str(insp.get("maquina","")),
+                    str(item.get("seccion","")), int(item.get("item_numero",0)),
+                    str(item.get("descripcion","")), res]
+            for ci, v in enumerate(vals, start=1):
+                c = ws2.cell(fila2, ci, v)
+                c.font = ft_nc if res == "NC" else ft_normal
+                c.border = borde
+                c.alignment = izq if ci == 6 else centro
+                if fill_item:
+                    c.fill = fill_item
+            ws2.row_dimensions[fila2].height = 18
+            fila2 += 1
+    ws2.freeze_panes = "A3"
+
+    # =========================================================================
+    # HOJA 3 – RESUMEN POR MÁQUINA
+    # =========================================================================
+    ws3 = wb.create_sheet("Por Máquina")
+    ws3.merge_cells("A1:H1")
+    ws3["A1"] = "Resumen de Inspecciones por Máquina"
+    ws3["A1"].font = ft_titulo; ws3["A1"].fill = fill_titulo; ws3["A1"].alignment = centro
+    ws3.row_dimensions[1].height = 26
+
+    hdrs3   = ["MÁQUINA","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN","ÚLTIMO INSPECTOR","ÚLTIMA FECHA"]
+    anchos3 = [22, 12, 14, 14, 14, 14, 28, 14]
+    for ci, (h, w) in enumerate(zip(hdrs3, anchos3), start=1):
+        c = ws3.cell(2, ci, h)
+        c.font = ft_header; c.fill = fill_header; c.alignment = centro; c.border = borde
+        ws3.column_dimensions[get_column_letter(ci)].width = w
+    ws3.row_dimensions[2].height = 24
+
+    if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
+        resumen_maq = df_inspecciones.groupby("maquina").apply(lambda g: pd.Series({
+            "total":       len(g),
+            "aprobadas":   g["estado"].str.contains("Aprobada",      na=False).sum(),
+            "con_obs":     g["estado"].str.contains("Observaciones",  na=False).sum(),
+            "rechazadas":  g["estado"].str.contains("Rechazada",      na=False).sum(),
+            "ultimo_insp": g.sort_values("fecha").iloc[-1]["trabajador"] if len(g) > 0 else "",
+            "ultima_fecha":str(g["fecha"].max()),
+        })).reset_index().sort_values("total", ascending=False)
+
+        for i, row in enumerate(resumen_maq.itertuples(), start=3):
+            pct    = f"{round(row.aprobadas / row.total * 100, 1)}%" if row.total > 0 else "0%"
+            fill_r = PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None
+            vals   = [row.maquina, int(row.total), int(row.aprobadas),
+                      int(row.con_obs), int(row.rechazadas), pct,
+                      str(row.ultimo_insp), str(row.ultima_fecha)]
+            for ci, v in enumerate(vals, start=1):
+                c = ws3.cell(i, ci, v)
+                c.font = ft_normal; c.border = borde
+                c.alignment = izq if ci in (1, 7) else centro
+                if fill_r: c.fill = fill_r
+            ws3.row_dimensions[i].height = 18
+    ws3.freeze_panes = "A3"
+
+    # =========================================================================
+    # HOJA 4 – RANKING NC
+    # =========================================================================
+    ws4 = wb.create_sheet("Ranking NC")
+    ws4.merge_cells("A1:D1")
+    ws4["A1"] = "Ranking de No Conformidades por Ítem"
+    ws4["A1"].font = ft_titulo; ws4["A1"].fill = fill_titulo; ws4["A1"].alignment = centro
+    ws4.row_dimensions[1].height = 26
+
+    hdrs4   = ["SECCIÓN", "DESCRIPCIÓN DEL ÍTEM", "# NC", "% NC"]
+    anchos4 = [30, 75, 8, 10]
+    for ci, (h, w) in enumerate(zip(hdrs4, anchos4), start=1):
+        c = ws4.cell(2, ci, h)
+        c.font = ft_header; c.fill = PatternFill("solid", start_color="922B21")
+        c.alignment = centro; c.border = borde
+        ws4.column_dimensions[get_column_letter(ci)].width = w
+    ws4.row_dimensions[2].height = 24
+
+    if not df_all_items.empty:
+        total_insp = len(df_inspecciones)
+        ranking_nc = df_all_items.groupby(["seccion","descripcion"]).apply(
+            lambda g: pd.Series({"num_nc": (g["resultado"] == "NC").sum()})
+        ).reset_index().sort_values("num_nc", ascending=False)
+
+        for i, row in enumerate(ranking_nc.itertuples(), start=3):
+            pct    = f"{round(row.num_nc / total_insp * 100, 1)}%" if total_insp > 0 else "0%"
+            fill_r4 = PatternFill("solid", start_color="FADBD8") if row.num_nc > 0 and i % 2 == 0 else (
+                      PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None)
+            vals = [row.seccion, row.descripcion, int(row.num_nc), pct]
+            for ci, v in enumerate(vals, start=1):
+                c = ws4.cell(i, ci, v)
+                c.font = ft_nc if row.num_nc > 0 and ci == 3 else ft_normal
+                c.border = borde
+                c.alignment = izq if ci == 2 else centro
+                if fill_r4: c.fill = fill_r4
+            ws4.row_dimensions[i].height = 18
+    ws4.freeze_panes = "A3"
+
+    # =========================================================================
+    # HOJA 5 – POR INSPECTOR
+    # =========================================================================
+    ws5 = wb.create_sheet("Por Inspector")
+    ws5.merge_cells("A1:F1")
+    ws5["A1"] = "Resumen por Inspector / Trabajador"
+    ws5["A1"].font = ft_titulo; ws5["A1"].fill = fill_titulo; ws5["A1"].alignment = centro
+    ws5.row_dimensions[1].height = 26
+
+    hdrs5   = ["TRABAJADOR","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN"]
+    anchos5 = [30, 12, 14, 14, 14, 14]
+    for ci, (h, w) in enumerate(zip(hdrs5, anchos5), start=1):
+        c = ws5.cell(2, ci, h)
+        c.font = ft_header; c.fill = PatternFill("solid", start_color="1A5276")
+        c.alignment = centro; c.border = borde
+        ws5.column_dimensions[get_column_letter(ci)].width = w
+    ws5.row_dimensions[2].height = 24
+
+    if not df_inspecciones.empty and "trabajador" in df_inspecciones.columns:
+        resumen_insp = df_inspecciones[
+            df_inspecciones["trabajador"].notna() & (df_inspecciones["trabajador"].str.strip() != "")
+        ].groupby("trabajador").apply(lambda g: pd.Series({
+            "total":      len(g),
+            "aprobadas":  g["estado"].str.contains("Aprobada",      na=False).sum(),
+            "con_obs":    g["estado"].str.contains("Observaciones",  na=False).sum(),
+            "rechazadas": g["estado"].str.contains("Rechazada",     na=False).sum(),
+        })).reset_index().sort_values("total", ascending=False)
+
+        for i, row in enumerate(resumen_insp.itertuples(), start=3):
+            pct    = f"{round(row.aprobadas / row.total * 100, 1)}%" if row.total > 0 else "0%"
+            fill_r = PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None
+            vals   = [row.trabajador, int(row.total), int(row.aprobadas),
+                      int(row.con_obs), int(row.rechazadas), pct]
+            for ci, v in enumerate(vals, start=1):
+                c = ws5.cell(i, ci, v)
+                c.font = ft_normal; c.border = borde
+                c.alignment = izq if ci == 1 else centro
+                if fill_r: c.fill = fill_r
+            ws5.row_dimensions[i].height = 18
+    ws5.freeze_panes = "A3"
+
+    # =========================================================================
+    # HOJA 6 – GRÁFICAS
+    # =========================================================================
+    try:
+        from openpyxl.chart import PieChart, Reference
+        from openpyxl.chart.series import DataPoint
+
+        ws6 = wb.create_sheet("Gráficas")
+        ws6["A1"] = "Estado"; ws6["B1"] = "Cantidad"
+        ws6["A1"].font = ft_header; ws6["B1"].font = ft_header
+        ws6["A1"].fill = fill_header; ws6["B1"].fill = fill_header
+
+        estados_g = ["Aprobada", "Con Observaciones", "Rechazada"]
+        for i, est in enumerate(estados_g, start=2):
+            cnt = len(df_inspecciones[df_inspecciones["estado"].str.contains(est, na=False)]) \
+                  if "estado" in df_inspecciones.columns else 0
+            ws6.cell(i, 1, est).border = borde
+            ws6.cell(i, 2, cnt).border  = borde
+
+        pie = PieChart()
+        pie.title  = "Distribución por Estado"
+        pie.style  = 10
+        labels     = Reference(ws6, min_col=1, min_row=2, max_row=4)
+        data       = Reference(ws6, min_col=2, min_row=1, max_row=4)
+        pie.add_data(data, titles_from_data=True)
+        pie.set_categories(labels)
+        pie.width  = 15; pie.height = 12
+        colores_g  = ["2ECC71", "F39C12", "E74C3C"]
+        for idx, color in enumerate(colores_g):
+            pt = DataPoint(idx=idx)
+            pt.graphicalProperties.solidFill = color
+            pie.series[0].dPt.append(pt)
+        ws6.add_chart(pie, "D1")
+        for col_l, w in zip(["A","B"], [22, 10]):
+            ws6.column_dimensions[col_l].width = w
+    except Exception:
+        pass
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+# ==================== MAIN ====================
 def main():
-    st.set_page_config(
-        page_title="CRM Clientes - Transporte de Carga",
-        layout="wide",
-        page_icon="🏢"
-    )
-    st.title("🏢 CRM de Clientes - Transporte de Carga")
+    st.markdown("""
+    <div class="main-header">
+        <h1>🔧 INSPECCIONES PREOPERACIONALES</h1>
+        <p>Registro y seguimiento de inspecciones de equipos — SCA ZF</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    session_defaults = {
-        'db': None,
-        'cliente_seleccionado': None,
-        'editando_cliente': False,
-        'confirmar_eliminar_cliente': None,
-        'confirmar_eliminar_contacto': None,
-        'confirmar_eliminar_tarifa': None,
-        'confirmar_eliminar_nota': None,
-        'editando_tarifa_id': None,
-    }
-    for key, val in session_defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+    if "db" not in st.session_state:
+        st.session_state.db = DB()
+    if "editando_id" not in st.session_state:
+        st.session_state.editando_id = None
 
-    if st.session_state.db is None:
-        db = DB()
-        db.init_tablas()
-        st.session_state.db = db
     db = st.session_state.db
 
-    tab_resumen, tab_clientes, tab_nuevo, tab_seguimiento, tab_tarifas_global = st.tabs([
-        "📊 Resumen",
-        "📋 Clientes",
-        "➕ Nuevo cliente",
-        "🔔 Seguimiento",
-        "💲 Tarifas",
-    ])
+    tab1, tab2, tab3 = st.tabs(["📝 Nueva Inspección", "🔍 Historial y Reportes", "📊 Dashboard"])
 
-    # ==================== TAB 1: RESUMEN ====================
-    with tab_resumen:
-        st.header("Resumen de clientes")
-        df_resumen = db.obtener_resumen_clientes()
+    # =========================================================================
+    # TAB 1 – NUEVA INSPECCIÓN
+    # =========================================================================
+    with tab1:
+        st.markdown("### Registrar Nueva Inspección Preoperacional")
 
-        if df_resumen.empty:
-            st.info("Aún no hay clientes registrados. Ve a **➕ Nuevo cliente** para comenzar.")
-        else:
-            total_clientes = len(df_resumen)
-            activos        = len(df_resumen[df_resumen['estado'] == 'activo'])
-            preferencial   = len(df_resumen[df_resumen['categoria'] == 'preferencial'])
-            potencial      = len(df_resumen[df_resumen['categoria'] == 'potencial'])
-            inactivos      = len(df_resumen[df_resumen['estado'] == 'inactivo'])
+        st.markdown("<div class='seccion-titulo'>🏭 1. DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
+        d1, d2, d3, d4, d5 = st.columns(5)
+        with d1: fecha_insp   = st.date_input("📅 Fecha", datetime.now(), key="n_fecha")
+        with d2: maquina_sel  = st.selectbox("⚙️ Máquina", MAQUINAS, key="n_maquina")
+        with d3: modelo_inp   = st.text_input("Modelo",      placeholder="Ej: ZF-200X", key="n_modelo")
+        with d4: marca_inp    = st.text_input("Marca",       placeholder="Ej: SCA",     key="n_marca")
+        with d5: placa_inp    = st.text_input("Placa / Serie", placeholder="Ej: MQ-001", key="n_placa")
 
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Total clientes",    total_clientes)
-            col2.metric("Activos",           activos)
-            col3.metric("Preferenciales 🔵", preferencial)
-            col4.metric("Potenciales 🟡",    potencial)
-            col5.metric("Inactivos ⚫",      inactivos)
+        if db.verificar_inspeccion_existente(fecha_insp, maquina_sel):
+            st.warning(f"⚠️ Ya existe una inspección para **{maquina_sel}** el **{fecha_insp}**. Si continúas, se registrará una segunda.")
 
-            st.divider()
+        st.markdown("<div class='seccion-titulo'>🔍 2. LISTA DE ACTIVIDADES — ANTES DE SU USO</div>",
+                    unsafe_allow_html=True)
+        st.caption("Selecciona **C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
+        render_items_seccion("ANTES DE SU USO",                    ITEMS_ANTES_USO, "new", "au")
+        render_items_seccion("🦺 3A. ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP, "new", "epp")
+        render_items_seccion("⚡ 3B. SEGURIDAD ELÉCTRICA",      ITEMS_ELECTRICA,   "new", "elec")
 
-            col_f1, col_f2, col_f3 = st.columns(3)
-            with col_f1:
-                buscar_r = st.text_input("Buscar cliente", placeholder="Nombre o ciudad...", key="r_buscar")
-            with col_f2:
-                filtro_cat_r = st.selectbox("Categoría", ["Todas"] + [c.capitalize() for c in CATEGORIAS], key="r_cat")
-            with col_f3:
-                filtro_estado_r = st.selectbox("Estado", ["Todos", "Activo", "Inactivo"], key="r_estado")
+        st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL</div>", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: trabajador_inp = st.text_input("👷 Trabajador",          placeholder="Nombre del operario",    key="n_trab")
+        with c2: revisado_inp   = st.text_input("👤 Revisado por",        placeholder="Supervisor / Jefe",      key="n_rev")
+        with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto",  placeholder="Nombre del proyecto",    key="n_cli")
+        with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento", placeholder="Nombre del responsable", key="n_mant")
 
-            df_show = df_resumen.copy()
-            if buscar_r:
-                df_show = df_show[
-                    df_show['nombre'].str.contains(buscar_r, case=False, na=False) |
-                    df_show['ciudad'].str.contains(buscar_r, case=False, na=False)
-                ]
-            if filtro_cat_r != "Todas":
-                df_show = df_show[df_show['categoria'].str.lower() == filtro_cat_r.lower()]
-            if filtro_estado_r != "Todos":
-                df_show = df_show[df_show['estado'].str.lower() == filtro_estado_r.lower()]
+        e1, e2 = st.columns([1, 3])
+        with e1: estado_inp = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, key="n_estado")
+        with e2: obs_inp    = st.text_area("💬 Comentarios / Observaciones",
+                                            placeholder="Describa cualquier anomalía. REPORTAR INMEDIATAMENTE al encargado de equipos y al departamento de mantenimiento.",
+                                            height=90, key="n_obs")
 
-            df_show = df_show.sort_values('nombre')
-
-            for _, row in df_show.iterrows():
-                icono = "🔵" if row['categoria'] == 'preferencial' else \
-                        "🟢" if row['categoria'] == 'regular' else \
-                        "🟡" if row['categoria'] == 'potencial' else "⚫"
-                label_r = (
-                    f"{icono} **{row['nombre']}** | {row['ciudad']} | "
-                    f"{row.get('condicion_pago','—')} | {row.get('categoria','').capitalize()}"
-                )
-                with st.expander(label_r):
-                    col_ra, col_rb = st.columns([3, 2])
-                    with col_ra:
-                        st.write(f"📞 {row.get('telefono','—')} | 👤 {row.get('contacto_principal','—')}")
-                        st.write(f"💳 Condición pago: **{row.get('condicion_pago','—')}**")
-                        if row.get('fecha_inicio_relacion') is not None:
-                            st.write(f"📅 Relación desde: **{fmt_fecha(row['fecha_inicio_relacion'])}**")
-                    with col_rb:
-                        if st.button("📂 Ver ficha completa", key=f"ver_{row['id']}", type="primary"):
-                            st.session_state.cliente_seleccionado = row['id']
-                            st.rerun()
-
-            st.divider()
-            excel_crm = generar_excel_crm(db)
-            st.download_button(
-                label="📥 Exportar CRM a Excel",
-                data=excel_crm,
-                file_name=f"crm_clientes_{hora_colombia().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-
-    # ==================== TAB 2: FICHA DE CLIENTE ====================
-    with tab_clientes:
-        st.header("Ficha de cliente")
-
-        df_clientes_lista = db.obtener_clientes()
-        if df_clientes_lista.empty:
-            st.info("No hay clientes registrados aún.")
-        else:
-            opciones_ids = df_clientes_lista['id'].tolist()
-
-            idx_default = 0
-            if st.session_state.cliente_seleccionado in opciones_ids:
-                idx_default = opciones_ids.index(st.session_state.cliente_seleccionado)
-
-            cliente_id_sel = st.selectbox(
-                "Seleccionar cliente",
-                opciones_ids,
-                format_func=lambda x: df_clientes_lista[df_clientes_lista['id']==x]['nombre'].values[0],
-                index=idx_default,
-                key="sel_cliente_ficha"
-            )
-            st.session_state.cliente_seleccionado = cliente_id_sel
-
-            cliente = db.obtener_cliente(cliente_id_sel)
-            if cliente is None:
-                st.error("Cliente no encontrado.")
+        st.divider()
+        if st.button("💾 Guardar Inspección", type="primary", use_container_width=True, key="btn_guardar"):
+            if not maquina_sel:
+                st.error("⚠️ La máquina es obligatoria.")
             else:
-                col_h1, col_h2, col_h3 = st.columns([4, 1, 1])
-                with col_h1:
-                    cat_badge = badge_categoria(cliente.get('categoria','regular'))
-                    estado_color = "🟢" if cliente.get('estado') == 'activo' else "⚫"
-                    st.subheader(f"{estado_color} {cliente['nombre']}")
-                    st.caption(f"{cat_badge} | {cliente.get('ciudad','—')} | NIT: {cliente.get('nit','—')}")
-                with col_h2:
-                    if st.button("✏️ Editar", key="btn_editar_cli", type="primary"):
-                        st.session_state.editando_cliente = True
-                        st.rerun()
-                with col_h3:
-                    if st.session_state.confirmar_eliminar_cliente == cliente_id_sel:
-                        st.warning("¿Eliminar?")
-                        c_si, c_no = st.columns(2)
-                        with c_si:
-                            if st.button("Sí", key="si_del_cli"):
-                                db.eliminar_cliente(cliente_id_sel)
-                                st.session_state.cliente_seleccionado = None
-                                st.session_state.confirmar_eliminar_cliente = None
-                                st.rerun()
-                        with c_no:
-                            if st.button("No", key="no_del_cli"):
-                                st.session_state.confirmar_eliminar_cliente = None
-                                st.rerun()
-                    else:
-                        if st.button("🗑️ Eliminar", key="btn_del_cli"):
-                            st.session_state.confirmar_eliminar_cliente = cliente_id_sel
+                items_form = construir_items("new")
+                datos = {
+                    "fecha": fecha_insp, "maquina": maquina_sel,
+                    "modelo": modelo_inp, "marca": marca_inp, "placa": placa_inp,
+                    "trabajador": trabajador_inp, "revisado_por": revisado_inp,
+                    "cliente_proyecto": cliente_inp, "responsable_mantenimiento": resp_mant_inp,
+                    "estado": estado_inp.split(" ", 1)[1] if " " in estado_inp else estado_inp,
+                    "observaciones": obs_inp,
+                }
+                nc_count = sum(1 for it in items_form if it["resultado"] == "NC")
+                if db.guardar_inspeccion(datos, items_form):
+                    st.success(f"✅ Inspección guardada — {maquina_sel} | {fecha_insp} | {nc_count} NC detectadas")
+                    if nc_count > 0:
+                        st.warning(f"⚠️ Se detectaron **{nc_count} No Conformidades**. Reportar al encargado de mantenimiento.")
+                    st.balloons()
+
+    # =========================================================================
+    # TAB 2 – HISTORIAL
+    # =========================================================================
+    with tab2:
+        st.markdown("### 🔍 Historial de Inspecciones")
+
+        with st.expander("🛠️ Filtros", expanded=True):
+            f1, f2, f3, f4, f5 = st.columns(5)
+            with f1: fi    = st.date_input("Desde", datetime.now() - timedelta(days=30), key="h_fi")
+            with f2: ff    = st.date_input("Hasta", datetime.now(), key="h_ff")
+            with f3:
+                maq_opts = ["Todas"] + MAQUINAS
+                fm = st.selectbox("Máquina", maq_opts, key="h_fm")
+            with f4: ftrab = st.text_input("Trabajador", key="h_trab")
+            with f5:
+                est_opts = ["Todos"] + [e.split(" ", 1)[1] for e in ESTADOS_INSPECCION]
+                fe = st.selectbox("Estado", est_opts, key="h_fe")
+
+        df_hist = db.obtener_inspecciones(
+            fi, ff,
+            fm    if fm    != "Todas" else None,
+            fe    if fe    != "Todos" else None,
+            ftrab if ftrab else None
+        )
+
+        if not df_hist.empty:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total Inspecciones",       len(df_hist))
+            k2.metric("✅ Aprobadas",             len(df_hist[df_hist["estado"].str.contains("Aprobada",      na=False)]))
+            k3.metric("⚠️ Con Observaciones",     len(df_hist[df_hist["estado"].str.contains("Observaciones", na=False)]))
+            k4.metric("❌ Rechazadas",             len(df_hist[df_hist["estado"].str.contains("Rechazada",     na=False)]))
+
+            st.divider()
+            col_e1, col_e2 = st.columns([2, 5])
+            with col_e1:
+                nombre_rep = st.text_input("Nombre del reporte", value="Inspecciones_Preop", key="rep_nombre")
+            with col_e2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                excel_data = generar_excel(df_hist, db, titulo=nombre_rep)
+                st.download_button(
+                    "⬇️ Descargar Excel", data=excel_data,
+                    file_name=f"{nombre_rep}_{datetime.now(pytz.timezone('America/Bogota')).strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
+
+            st.divider()
+            cols_tabla = ["id","fecha","maquina","trabajador","revisado_por",
+                          "cliente_proyecto","placa","estado","observaciones"]
+            cols_ex = [c for c in cols_tabla if c in df_hist.columns]
+            st.dataframe(df_hist[cols_ex], use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.subheader("✏️ Ver Detalle / Editar")
+            df_hist["_label"] = df_hist.apply(
+                lambda r: f"ID {r['id']} | {r['fecha']} | {r['maquina']} | {r.get('trabajador','')} | {r.get('estado','')}",
+                axis=1
+            )
+            sel = st.selectbox("Seleccionar inspección:", df_hist["_label"].tolist(), key="h_sel")
+
+            if sel:
+                vid  = int(sel.split(" | ")[0].replace("ID ", ""))
+                row  = df_hist[df_hist["id"] == vid].iloc[0]
+                editando       = st.session_state.editando_id == vid
+                df_items_sel   = db.obtener_items_inspeccion(vid)
+
+                if not editando:
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.info(f"**Máquina:** {row['maquina']}")
+                        st.write(f"**Fecha:** {row['fecha']}")
+                        st.write(f"**Modelo:** {row.get('modelo','')}")
+                        st.write(f"**Marca:** {row.get('marca','')}")
+                        st.write(f"**Placa/Serie:** {row.get('placa','')}")
+                    with c2:
+                        st.write(f"**Trabajador:** {row.get('trabajador','')}")
+                        st.write(f"**Revisado por:** {row.get('revisado_por','')}")
+                        st.write(f"**Cliente/Proyecto:** {row.get('cliente_proyecto','')}")
+                        st.write(f"**Resp. Mantenimiento:** {row.get('responsable_mantenimiento','')}")
+                    with c3:
+                        estado_raw = str(row.get("estado",""))
+                        color = "🟢" if "Aprobada" in estado_raw else ("🔴" if "Rechazada" in estado_raw else "🟡")
+                        st.write(f"**Estado:** {color} {estado_raw}")
+                        st.write(f"**Observaciones:** {row.get('observaciones','')}")
+
+                    if not df_items_sel.empty:
+                        num_nc = len(df_items_sel[df_items_sel["resultado"] == "NC"])
+                        num_c  = len(df_items_sel[df_items_sel["resultado"] == "C"])
+                        st.write(f"**Resultado ítems:** 🟢 {num_c} Conformes · 🔴 {num_nc} No Conformes")
+                        for sec in df_items_sel["seccion"].unique():
+                            items_sec = df_items_sel[df_items_sel["seccion"] == sec]
+                            st.markdown(f"**{sec}**")
+                            for _, it in items_sec.iterrows():
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;{it['item_numero']}. {it['descripcion']} → **{badge_resultado(it['resultado'])}**")
+
+                    bc1, bc2 = st.columns(2)
+                    with bc1:
+                        if st.button("✏️ Editar", key=f"eb_{vid}"):
+                            st.session_state.editando_id = vid
+                            st.rerun()
+                    with bc2:
+                        if st.button("🗑️ Eliminar", key=f"del_{vid}"):
+                            db.eliminar_inspeccion(vid)
+                            st.success("Eliminada.")
                             st.rerun()
 
-                st.divider()
-
-                # Pestañas de la ficha
-                ft1, ft2, ft3, ft4 = st.tabs([
-                    "📋 Datos generales",
-                    "👥 Contactos",
-                    "💲 Tarifas pactadas",
-                    "📝 Notas y seguimiento",
-                ])
-
-                # ---- Datos generales ----
-                with ft1:
-                    if st.session_state.editando_cliente:
-                        st.subheader("✏️ Editar cliente")
-                        with st.form("form_editar_cliente"):
-                            col1e, col2e = st.columns(2)
-                            with col1e:
-                                nombre_e    = st.text_input("Nombre / Razón social", value=cliente['nombre'])
-                                nit_e       = st.text_input("NIT", value=cliente.get('nit','') or '')
-                                ciudad_e    = st.text_input("Ciudad", value=cliente.get('ciudad','') or '')
-                                direccion_e = st.text_input("Dirección", value=cliente.get('direccion','') or '')
-                                fi_rel_e    = st.date_input(
-                                    "Inicio de la relación comercial",
-                                    value=pd.to_datetime(cliente['fecha_inicio_relacion']).date()
-                                    if cliente.get('fecha_inicio_relacion') else datetime.today()
-                                )
-                            with col2e:
-                                telefono_e  = st.text_input("Teléfono", value=cliente.get('telefono','') or '')
-                                email_e     = st.text_input("Email", value=cliente.get('email','') or '')
-                                contacto_e  = st.text_input("Contacto principal", value=cliente.get('contacto_principal','') or '')
-                                cond_e      = st.selectbox(
-                                    "Condición de pago",
-                                    CONDICIONES_PAGO,
-                                    index=CONDICIONES_PAGO.index(cliente.get('condicion_pago','30 días'))
-                                    if cliente.get('condicion_pago') in CONDICIONES_PAGO else 3
-                                )
-                                cat_e = st.selectbox(
-                                    "Categoría",
-                                    CATEGORIAS,
-                                    index=CATEGORIAS.index(cliente.get('categoria','regular'))
-                                    if cliente.get('categoria') in CATEGORIAS else 0
-                                )
-                                estado_e = st.selectbox(
-                                    "Estado",
-                                    ["activo","inactivo"],
-                                    index=0 if cliente.get('estado','activo') == 'activo' else 1
-                                )
-                            obs_e = st.text_area("Observaciones", value=cliente.get('observaciones','') or '', height=80)
-                            col_g, col_c = st.columns(2)
-                            with col_g:
-                                guardar_e = st.form_submit_button("💾 Guardar cambios", type="primary")
-                            with col_c:
-                                cancelar_e = st.form_submit_button("✖ Cancelar")
-
-                            if guardar_e:
-                                if not nombre_e.strip():
-                                    st.error("⚠️ El nombre es obligatorio.")
-                                else:
-                                    ok = db.actualizar_cliente(cliente_id_sel, {
-                                        'nombre': nombre_e, 'nit': nit_e,
-                                        'direccion': direccion_e, 'ciudad': ciudad_e,
-                                        'telefono': telefono_e, 'email': email_e,
-                                        'contacto_principal': contacto_e,
-                                        'condicion_pago': cond_e,
-                                        'estado': estado_e, 'categoria': cat_e,
-                                        'observaciones': obs_e,
-                                        'fecha_inicio_relacion': fi_rel_e
-                                    })
-                                    if ok:
-                                        st.success("✅ Cliente actualizado.")
-                                        st.session_state.editando_cliente = False
-                                        st.rerun()
-                            if cancelar_e:
-                                st.session_state.editando_cliente = False
-                                st.rerun()
-                    else:
-                        col_d1, col_d2 = st.columns(2)
-                        with col_d1:
-                            st.markdown("**Información básica**")
-                            st.write(f"🏢 Nombre: **{cliente['nombre']}**")
-                            st.write(f"🪪 NIT: {cliente.get('nit','—')}")
-                            st.write(f"📍 Ciudad: {cliente.get('ciudad','—')}")
-                            st.write(f"🏠 Dirección: {cliente.get('direccion','—')}")
-                            st.write(f"📞 Teléfono: {cliente.get('telefono','—')}")
-                            st.write(f"📧 Email: {cliente.get('email','—')}")
-                        with col_d2:
-                            st.markdown("**Condiciones comerciales**")
-                            st.write(f"👤 Contacto principal: {cliente.get('contacto_principal','—')}")
-                            st.write(f"💳 Condición de pago: **{cliente.get('condicion_pago','—')}**")
-                            st.write(f"🏷️ Categoría: {badge_categoria(cliente.get('categoria','regular'))}")
-                            st.write(f"📅 Relación desde: {fmt_fecha(cliente.get('fecha_inicio_relacion'))}")
-                            if cliente.get('observaciones'):
-                                st.info(f"📝 {cliente['observaciones']}")
-
-                # ---- Contactos ----
-                with ft2:
-                    st.subheader("Contactos del cliente")
-                    df_contactos = db.obtener_contactos(cliente_id_sel)
-
-                    if df_contactos.empty:
-                        st.info("No hay contactos registrados para este cliente.")
-                    else:
-                        for _, cont in df_contactos.iterrows():
-                            principal_tag = " ⭐ Principal" if cont.get('es_principal') else ""
-                            with st.expander(f"👤 {cont['nombre']} — {cont.get('cargo','—')}{principal_tag}"):
-                                col_ca, col_cb = st.columns([3,1])
-                                with col_ca:
-                                    st.write(f"📞 {cont.get('telefono','—')} | 📧 {cont.get('email','—')}")
-                                    if cont.get('observaciones'):
-                                        st.caption(cont['observaciones'])
-                                with col_cb:
-                                    if st.session_state.confirmar_eliminar_contacto == cont['id']:
-                                        c_si2, c_no2 = st.columns(2)
-                                        with c_si2:
-                                            if st.button("Sí", key=f"si_cont_{cont['id']}"):
-                                                db.eliminar_contacto(cont['id'])
-                                                st.session_state.confirmar_eliminar_contacto = None
-                                                st.rerun()
-                                        with c_no2:
-                                            if st.button("No", key=f"no_cont_{cont['id']}"):
-                                                st.session_state.confirmar_eliminar_contacto = None
-                                                st.rerun()
-                                    else:
-                                        if st.button("🗑️", key=f"del_cont_{cont['id']}"):
-                                            st.session_state.confirmar_eliminar_contacto = cont['id']
-                                            st.rerun()
-
-                    st.divider()
-                    st.subheader("Agregar contacto")
-                    with st.form(f"form_contacto_{cliente_id_sel}", clear_on_submit=True):
-                        col_c1, col_c2 = st.columns(2)
-                        with col_c1:
-                            nombre_cont = st.text_input("Nombre completo *")
-                            cargo_cont  = st.text_input("Cargo")
-                            principal_c = st.checkbox("Es el contacto principal")
-                        with col_c2:
-                            tel_cont    = st.text_input("Teléfono")
-                            email_cont  = st.text_input("Email")
-                            obs_cont    = st.text_area("Observaciones", height=60)
-                        if st.form_submit_button("💾 Agregar contacto", type="primary"):
-                            if not nombre_cont.strip():
-                                st.error("⚠️ El nombre es obligatorio.")
-                            else:
-                                nid_c = db.crear_contacto({
-                                    'cliente_id': cliente_id_sel,
-                                    'nombre': nombre_cont,
-                                    'cargo': cargo_cont,
-                                    'telefono': tel_cont,
-                                    'email': email_cont,
-                                    'es_principal': principal_c,
-                                    'observaciones': obs_cont
-                                })
-                                if nid_c:
-                                    st.success(f"✅ Contacto **{nombre_cont.strip()}** agregado.")
-                                    st.rerun()
-
-                # ---- Tarifas pactadas ----
-                with ft3:
-                    st.subheader("Tarifas pactadas con este cliente")
-                    df_tarifas = db.obtener_tarifas(cliente_id_sel)
-
-                    if df_tarifas.empty:
-                        st.info("No hay tarifas registradas para este cliente.")
-                    else:
-                        for _, tar in df_tarifas.iterrows():
-                            vigente_tag = "✅ Vigente" if tar.get('vigente') else "❌ No vigente"
-                            label_tar = (
-                                f"{vigente_tag} | {tar['origen']} → {tar['destino']} | "
-                                f"${fmt(tar['tarifa'])} COP | {tar.get('tipo_vehiculo','')}"
-                            )
-                            with st.expander(label_tar):
-                                if st.session_state.editando_tarifa_id == tar['id']:
-                                    with st.form(f"form_edit_tar_{tar['id']}"):
-                                        col_te1, col_te2 = st.columns(2)
-                                        with col_te1:
-                                            orig_e  = st.text_input("Origen", value=tar['origen'])
-                                            dest_e  = st.text_input("Destino", value=tar['destino'])
-                                            tar_e_txt = st.text_input("Tarifa (COP)", value=fmt(tar['tarifa']))
-                                            tar_e   = limpiar(tar_e_txt)
-                                        with col_te2:
-                                            tv_e = st.selectbox(
-                                                "Tipo vehículo", TIPOS_VEHICULO,
-                                                index=TIPOS_VEHICULO.index(tar.get('tipo_vehiculo','tractomula'))
-                                                if tar.get('tipo_vehiculo') in TIPOS_VEHICULO else 0
-                                            )
-                                            vig_e = st.checkbox("Vigente", value=bool(tar.get('vigente', True)))
-                                            fd_e = st.date_input(
-                                                "Fecha desde",
-                                                value=pd.to_datetime(tar['fecha_desde']).date()
-                                                if tar.get('fecha_desde') else datetime.today()
-                                            )
-                                            fh_e = st.date_input(
-                                                "Fecha hasta",
-                                                value=pd.to_datetime(tar['fecha_hasta']).date()
-                                                if tar.get('fecha_hasta') else datetime.today()
-                                            )
-                                        obs_te = st.text_input("Observaciones", value=tar.get('observaciones','') or '')
-                                        col_gtar, col_ctar = st.columns(2)
-                                        with col_gtar:
-                                            g_tar = st.form_submit_button("💾 Guardar", type="primary")
-                                        with col_ctar:
-                                            c_tar = st.form_submit_button("✖ Cancelar")
-                                        if g_tar:
-                                            ok_tar = db.actualizar_tarifa(tar['id'], {
-                                                'origen': orig_e, 'destino': dest_e,
-                                                'tarifa': tar_e, 'tipo_vehiculo': tv_e,
-                                                'vigente': vig_e, 'observaciones': obs_te,
-                                                'fecha_desde': fd_e, 'fecha_hasta': fh_e
-                                            })
-                                            if ok_tar:
-                                                st.success("✅ Tarifa actualizada.")
-                                                st.session_state.editando_tarifa_id = None
-                                                st.rerun()
-                                        if c_tar:
-                                            st.session_state.editando_tarifa_id = None
-                                            st.rerun()
-                                else:
-                                    col_ti, col_tb = st.columns([4,1])
-                                    with col_ti:
-                                        st.write(f"📅 Vigente desde: {fmt_fecha(tar.get('fecha_desde'))} | hasta: {fmt_fecha(tar.get('fecha_hasta'))}")
-                                        if tar.get('observaciones'):
-                                            st.caption(tar['observaciones'])
-                                    with col_tb:
-                                        if st.button("✏️ Editar", key=f"edit_tar_{tar['id']}"):
-                                            st.session_state.editando_tarifa_id = tar['id']
-                                            st.rerun()
-                                        if st.session_state.confirmar_eliminar_tarifa == tar['id']:
-                                            c_si3, c_no3 = st.columns(2)
-                                            with c_si3:
-                                                if st.button("Sí", key=f"si_tar_{tar['id']}"):
-                                                    db.eliminar_tarifa(tar['id'])
-                                                    st.session_state.confirmar_eliminar_tarifa = None
-                                                    st.rerun()
-                                            with c_no3:
-                                                if st.button("No", key=f"no_tar_{tar['id']}"):
-                                                    st.session_state.confirmar_eliminar_tarifa = None
-                                                    st.rerun()
-                                        else:
-                                            if st.button("🗑️", key=f"del_tar_{tar['id']}"):
-                                                st.session_state.confirmar_eliminar_tarifa = tar['id']
-                                                st.rerun()
-
-                    st.divider()
-                    st.subheader("Registrar nueva tarifa")
-                    with st.form(f"form_tarifa_{cliente_id_sel}", clear_on_submit=True):
-                        col_t1, col_t2 = st.columns(2)
-                        with col_t1:
-                            orig_t  = st.text_input("Origen *", placeholder="Ciudad de origen")
-                            dest_t  = st.text_input("Destino *", placeholder="Ciudad de destino")
-                            tar_txt = st.text_input("Tarifa (COP) *", placeholder="Ej: 1.500.000")
-                            tar_val = limpiar(tar_txt)
-                            if tar_val > 0:
-                                st.caption(f"💵 {fmt(tar_val)} COP")
-                        with col_t2:
-                            tipo_v    = st.selectbox("Tipo de vehículo", TIPOS_VEHICULO)
-                            vigente_t = st.checkbox("Vigente", value=True)
-                            fd_t      = st.date_input("Fecha desde", value=datetime.today())
-                            fh_t      = st.date_input("Fecha hasta (opcional)", value=None)
-                            reg_por_t = st.text_input("Registrado por", placeholder="Tu nombre")
-                        obs_t = st.text_input("Observaciones")
-                        if st.form_submit_button("💾 Registrar tarifa", type="primary"):
-                            errores_t = []
-                            if not orig_t.strip():  errores_t.append("Origen obligatorio")
-                            if not dest_t.strip():  errores_t.append("Destino obligatorio")
-                            if tar_val <= 0:        errores_t.append("Tarifa debe ser mayor a 0")
-                            if errores_t:
-                                for et in errores_t: st.error(f"⚠️ {et}")
-                            else:
-                                nid_t = db.crear_tarifa({
-                                    'cliente_id': cliente_id_sel,
-                                    'origen': orig_t, 'destino': dest_t,
-                                    'tarifa': tar_val, 'tipo_vehiculo': tipo_v,
-                                    'vigente': vigente_t, 'observaciones': obs_t,
-                                    'fecha_desde': fd_t, 'fecha_hasta': fh_t,
-                                    'registrado_por': reg_por_t
-                                })
-                                if nid_t:
-                                    st.success(f"✅ Tarifa registrada: {orig_t.upper()} → {dest_t.upper()} | ${fmt(tar_val)} COP")
-                                    st.rerun()
-
-                # ---- Notas y seguimiento ----
-                with ft4:
-                    st.subheader("Notas y seguimiento")
-                    df_notas_c = db.obtener_notas(cliente_id_sel)
-
-                    if df_notas_c.empty:
-                        st.info("No hay notas para este cliente.")
-                    else:
-                        for _, nota in df_notas_c.iterrows():
-                            completada = bool(nota.get('completada', False))
-                            tipo_label = badge_tipo_nota(nota.get('tipo','nota'))
-                            fecha_seg  = nota.get('fecha_seguimiento')
-                            seg_tag    = f" | 📅 Seguimiento: {fmt_fecha(fecha_seg)}" if fecha_seg else ""
-                            check_tag  = " ✅" if completada else ""
-                            with st.expander(f"{tipo_label} | {nota['titulo']}{seg_tag}{check_tag}"):
-                                col_na, col_nb = st.columns([4,1])
-                                with col_na:
-                                    st.write(nota['contenido'])
-                                    if nota.get('autor'):
-                                        st.caption(f"Por: {nota['autor']} | {fmt_fecha(nota.get('fecha_registro'))}")
-                                with col_nb:
-                                    if not completada:
-                                        if st.button("✅ Completar", key=f"comp_nota_{nota['id']}"):
-                                            db.marcar_nota_completada(nota['id'], True)
-                                            st.rerun()
-                                    else:
-                                        if st.button("↩️ Reabrir", key=f"reab_nota_{nota['id']}"):
-                                            db.marcar_nota_completada(nota['id'], False)
-                                            st.rerun()
-                                    if st.session_state.confirmar_eliminar_nota == nota['id']:
-                                        c_si4, c_no4 = st.columns(2)
-                                        with c_si4:
-                                            if st.button("Sí", key=f"si_nota_{nota['id']}"):
-                                                db.eliminar_nota(nota['id'])
-                                                st.session_state.confirmar_eliminar_nota = None
-                                                st.rerun()
-                                        with c_no4:
-                                            if st.button("No", key=f"no_nota_{nota['id']}"):
-                                                st.session_state.confirmar_eliminar_nota = None
-                                                st.rerun()
-                                    else:
-                                        if st.button("🗑️", key=f"del_nota_{nota['id']}"):
-                                            st.session_state.confirmar_eliminar_nota = nota['id']
-                                            st.rerun()
-
-                    st.divider()
-                    st.subheader("Nueva nota / actividad")
-                    with st.form(f"form_nota_{cliente_id_sel}", clear_on_submit=True):
-                        col_n1, col_n2 = st.columns(2)
-                        with col_n1:
-                            tipo_nota    = st.selectbox("Tipo", TIPOS_NOTA,
-                                format_func=lambda x: badge_tipo_nota(x))
-                            titulo_nota  = st.text_input("Título *", placeholder="Resumen breve")
-                            autor_nota   = st.text_input("Autor", placeholder="Tu nombre")
-                        with col_n2:
-                            fecha_seg_n  = st.date_input("Fecha de seguimiento (opcional)", value=None)
-                        contenido_nota = st.text_area("Contenido / Detalle *", height=100)
-                        if st.form_submit_button("💾 Guardar nota", type="primary"):
-                            errores_n = []
-                            if not titulo_nota.strip():    errores_n.append("El título es obligatorio.")
-                            if not contenido_nota.strip(): errores_n.append("El contenido es obligatorio.")
-                            if errores_n:
-                                for en in errores_n: st.error(f"⚠️ {en}")
-                            else:
-                                nid_n = db.crear_nota({
-                                    'cliente_id': cliente_id_sel,
-                                    'tipo': tipo_nota,
-                                    'titulo': titulo_nota,
-                                    'contenido': contenido_nota,
-                                    'autor': autor_nota,
-                                    'fecha_seguimiento': fecha_seg_n,
-                                })
-                                if nid_n:
-                                    st.success("✅ Nota guardada.")
-                                    st.rerun()
-
-    # ==================== TAB 3: NUEVO CLIENTE ====================
-    with tab_nuevo:
-        st.header("Registrar nuevo cliente")
-        with st.form("form_nuevo_cliente_crm", clear_on_submit=True):
-            col1n, col2n = st.columns(2)
-            with col1n:
-                nombre_n    = st.text_input("Nombre / Razón social *", placeholder="Ej: GLOBO EXPRESS S.A.S")
-                nit_n       = st.text_input("NIT", placeholder="Ej: 900.123.456-7")
-                ciudad_n    = st.text_input("Ciudad *", placeholder="Ej: BOGOTÁ")
-                direccion_n = st.text_input("Dirección", placeholder="Ej: Cra 15 # 93-47")
-                fi_rel_n    = st.date_input("Fecha inicio relación comercial", value=datetime.today())
-            with col2n:
-                telefono_n  = st.text_input("Teléfono", placeholder="Ej: 3001234567")
-                email_n     = st.text_input("Email", placeholder="contacto@empresa.com")
-                contacto_n  = st.text_input("Contacto principal", placeholder="Nombre del contacto")
-                cond_n      = st.selectbox("Condición de pago", CONDICIONES_PAGO, index=3)
-                cat_n       = st.selectbox("Categoría", CATEGORIAS,
-                    format_func=lambda x: badge_categoria(x))
-            obs_n = st.text_area("Observaciones", height=80)
-
-            if st.form_submit_button("💾 Registrar cliente", type="primary"):
-                errores_nuevo = []
-                if not nombre_n.strip(): errores_nuevo.append("El nombre es obligatorio.")
-                if not ciudad_n.strip(): errores_nuevo.append("La ciudad es obligatoria.")
-                if errores_nuevo:
-                    for en in errores_nuevo: st.error(f"⚠️ {en}")
                 else:
-                    nid_nuevo = db.crear_cliente({
-                        'nombre': nombre_n, 'nit': nit_n,
-                        'direccion': direccion_n, 'ciudad': ciudad_n,
-                        'telefono': telefono_n, 'email': email_n,
-                        'contacto_principal': contacto_n,
-                        'condicion_pago': cond_n,
-                        'estado': 'activo', 'categoria': cat_n,
-                        'observaciones': obs_n,
-                        'fecha_inicio_relacion': fi_rel_n
-                    })
-                    if nid_nuevo:
-                        st.success(f"✅ Cliente **{nombre_n.strip().upper()}** registrado (ID: {nid_nuevo})")
-                        st.session_state.cliente_seleccionado = nid_nuevo
+                    st.markdown("#### ✏️ Editando inspección")
+                    prev_vals = {}
+                    if not df_items_sel.empty:
+                        for _, it in df_items_sel.iterrows():
+                            sec   = it["seccion"]
+                            idx_i = int(it["item_numero"]) - 1
+                            if sec == "ANTES DE SU USO":
+                                prev_vals[f"edit_{vid}_au_{idx_i}"]   = it["resultado"]
+                            elif "PROTECCIÓN" in sec:
+                                prev_vals[f"edit_{vid}_epp_{idx_i}"]  = it["resultado"]
+                            elif "ELÉCTRICA" in sec:
+                                prev_vals[f"edit_{vid}_elec_{idx_i}"] = it["resultado"]
+
+                    ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                    with ec1: e_fecha  = st.date_input("Fecha",   value=row["fecha"],   key=f"ef_{vid}")
+                    with ec2:
+                        maq_idx = MAQUINAS.index(row["maquina"]) if row["maquina"] in MAQUINAS else 0
+                        e_maq   = st.selectbox("Máquina", MAQUINAS, index=maq_idx, key=f"em_{vid}")
+                    with ec3: e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
+                    with ec4: e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
+                    with ec5: e_placa  = st.text_input("Placa",  value=str(row.get("placa", "") or ""), key=f"eplaca_{vid}")
+
+                    render_items_seccion("ANTES DE SU USO",                    ITEMS_ANTES_USO, f"edit_{vid}", "au",   prev_vals)
+                    render_items_seccion("ELEMENTOS DE PROTECCIÓN PERSONAL",   ITEMS_EPP,       f"edit_{vid}", "epp",  prev_vals)
+                    render_items_seccion("SEGURIDAD ELÉCTRICA",                ITEMS_ELECTRICA, f"edit_{vid}", "elec", prev_vals)
+
+                    with st.form(f"form_edit_{vid}"):
+                        ee1, ee2, ee3, ee4 = st.columns(4)
+                        with ee1: e_trab = st.text_input("Trabajador",       value=str(row.get("trabajador","")                or ""), key=f"etrab_{vid}")
+                        with ee2: e_rev  = st.text_input("Revisado por",     value=str(row.get("revisado_por","")              or ""), key=f"erev_{vid}")
+                        with ee3: e_cli  = st.text_input("Cliente/Proyecto", value=str(row.get("cliente_proyecto","")          or ""), key=f"ecli_{vid}")
+                        with ee4: e_mant = st.text_input("Resp. Mant.",      value=str(row.get("responsable_mantenimiento","") or ""), key=f"emant_{vid}")
+
+                        estados_l  = [e.split(" ", 1)[1] for e in ESTADOS_INSPECCION]
+                        est_actual = str(row.get("estado") or "Aprobada")
+                        est_idx    = estados_l.index(est_actual) if est_actual in estados_l else 0
+
+                        ef1, ef2 = st.columns([1, 3])
+                        with ef1: e_estado = st.selectbox("Estado", ESTADOS_INSPECCION, index=est_idx, key=f"eest_{vid}")
+                        with ef2: e_obs    = st.text_area("Observaciones", value=str(row.get("observaciones","") or ""),
+                                                           key=f"eobs_{vid}", height=80)
+
+                        sg1, sg2 = st.columns(2)
+                        with sg1: guardar  = st.form_submit_button("💾 Guardar Cambios", type="primary")
+                        with sg2: cancelar = st.form_submit_button("❌ Cancelar")
+
+                    if guardar:
+                        items_edit = construir_items(f"edit_{vid}")
+                        datos_edit = {
+                            "fecha": e_fecha, "maquina": e_maq, "modelo": e_modelo,
+                            "marca": e_marca, "placa": e_placa,
+                            "trabajador": e_trab, "revisado_por": e_rev,
+                            "cliente_proyecto": e_cli, "responsable_mantenimiento": e_mant,
+                            "estado": e_estado.split(" ", 1)[1] if " " in e_estado else e_estado,
+                            "observaciones": e_obs,
+                        }
+                        if db.actualizar_inspeccion(vid, datos_edit, items_edit):
+                            st.success("✅ Inspección actualizada.")
+                            st.session_state.editando_id = None
+                            st.rerun()
+                    if cancelar:
+                        st.session_state.editando_id = None
                         st.rerun()
-
-    # ==================== TAB 4: SEGUIMIENTO ====================
-    with tab_seguimiento:
-        st.header("🔔 Seguimientos pendientes")
-        st.caption("Tareas, llamadas o reuniones con fecha de seguimiento asignada y aún no completadas.")
-
-        df_pendientes_seg = db.obtener_notas(pendientes=True)
-
-        if df_pendientes_seg.empty:
-            st.success("✅ No hay seguimientos pendientes.")
         else:
-            hoy_seg = hora_colombia().date()
-            vencidos, hoy_items, proximos = [], [], []
-            for _, n in df_pendientes_seg.iterrows():
-                try:
-                    fs = pd.to_datetime(n['fecha_seguimiento']).date()
-                except:
-                    fs = None
-                if fs is None:
-                    continue
-                if fs < hoy_seg:
-                    vencidos.append((n, fs))
-                elif fs == hoy_seg:
-                    hoy_items.append((n, fs))
-                else:
-                    proximos.append((n, fs))
+            st.warning("No hay inspecciones con los filtros seleccionados.")
 
-            col_sv1, col_sv2, col_sv3 = st.columns(3)
-            col_sv1.metric("🔴 Vencidos", len(vencidos))
-            col_sv2.metric("🟡 Hoy",      len(hoy_items))
-            col_sv3.metric("🟢 Próximos", len(proximos))
+    # =========================================================================
+    # TAB 3 – DASHBOARD
+    # =========================================================================
+    with tab3:
+        st.markdown("### 📊 Dashboard de Inspecciones")
+        try:
+            import plotly.express as px
 
-            def render_seguimiento_items(items, label):
-                if not items:
-                    return
-                st.subheader(label)
-                for nota, fs in sorted(items, key=lambda x: x[1]):
-                    dias_diff = (fs - hoy_seg).days
-                    if dias_diff < 0:
-                        dias_label = f"Venció hace {abs(dias_diff)} día(s)"
-                    elif dias_diff == 0:
-                        dias_label = "Hoy"
-                    else:
-                        dias_label = f"En {dias_diff} día(s)"
+            col_r1, _ = st.columns([2, 4])
+            with col_r1:
+                rango = st.date_input(
+                    "Período",
+                    value=(datetime.now().replace(day=1), datetime.now()),
+                    key="dash_rango"
+                )
 
-                    with st.expander(
-                        f"{badge_tipo_nota(nota.get('tipo','nota'))} | "
-                        f"**{nota.get('cliente_nombre','?')}** | {nota['titulo']} | {dias_label}"
-                    ):
-                        col_sia, col_sib = st.columns([4,1])
-                        with col_sia:
-                            st.write(nota['contenido'])
-                            st.caption(f"📅 {fmt_fecha(fs)} | Autor: {nota.get('autor','—')}")
-                        with col_sib:
-                            if st.button("✅ Completar", key=f"seg_comp_{nota['id']}", type="primary"):
-                                db.marcar_nota_completada(nota['id'], True)
-                                st.rerun()
-                            if st.button("📂 Ver cliente", key=f"seg_ver_{nota['id']}"):
-                                st.session_state.cliente_seleccionado = int(nota['cliente_id'])
-                                st.rerun()
+            if not (isinstance(rango, (list, tuple)) and len(rango) == 2):
+                st.info("Selecciona un rango de fechas completo.")
+                return
 
-            render_seguimiento_items(vencidos,  "🔴 Vencidos")
-            render_seguimiento_items(hoy_items, "🟡 Para hoy")
-            render_seguimiento_items(proximos,  "🟢 Próximos")
+            df_s = db.stats_dashboard(rango[0], rango[1])
+            if df_s.empty:
+                st.info("No hay datos en este período.")
+                return
 
-    # ==================== TAB 5: TARIFAS GLOBAL ====================
-    with tab_tarifas_global:
-        st.header("💲 Vista global de tarifas")
-        st.caption("Consulta y compara tarifas de todos los clientes por ruta.")
+            total  = len(df_s)
+            apro   = len(df_s[df_s["estado"].str.contains("Aprobada",      na=False)])
+            obs_c  = len(df_s[df_s["estado"].str.contains("Observaciones", na=False)])
+            rech_c = len(df_s[df_s["estado"].str.contains("Rechazada",     na=False)])
+            pct    = round(apro / total * 100) if total > 0 else 0
+            total_nc = int(df_s["num_nc"].sum())
 
-        col_tg1, col_tg2, col_tg3 = st.columns(3)
-        with col_tg1:
-            buscar_orig = st.text_input("Filtrar origen", placeholder="Ciudad...")
-        with col_tg2:
-            buscar_dest = st.text_input("Filtrar destino", placeholder="Ciudad...")
-        with col_tg3:
-            solo_vig = st.checkbox("Solo vigentes", value=True)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("🔧 Total Inspecciones",  total)
+            k2.metric("✅ Aprobadas",            apro,     f"{pct}%")
+            k3.metric("⚠️ Con Observaciones",   obs_c)
+            k4.metric("❌ Rechazadas",           rech_c)
+            k5.metric("🔴 Total NC detectadas", total_nc)
 
-        df_clientes_t = db.obtener_clientes()
-        todas_tarifas = []
-        for _, c in df_clientes_t.iterrows():
-            df_t = db.obtener_tarifas(c['id'], solo_vigentes=solo_vig)
-            for _, t in df_t.iterrows():
-                todas_tarifas.append({
-                    'Cliente': c['nombre'],
-                    'Origen': t['origen'],
-                    'Destino': t['destino'],
-                    'Tarifa (COP)': int(t['tarifa']),
-                    'Tipo vehículo': t.get('tipo_vehiculo',''),
-                    'Vigente': "Sí" if t.get('vigente') else "No",
-                    'Desde': fmt_fecha(t.get('fecha_desde')),
-                    'Registrado por': t.get('registrado_por',''),
-                })
+            st.divider()
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown("#### Distribución por Estado")
+                est_c_df = df_s["estado"].value_counts().reset_index()
+                est_c_df.columns = ["estado","cantidad"]
+                colores_est = {"Aprobada":"#2ecc71","Con Observaciones":"#f39c12","Rechazada":"#e74c3c"}
+                fig1 = px.pie(est_c_df, values="cantidad", names="estado", hole=0.45,
+                              color="estado", color_discrete_map=colores_est)
+                fig1.update_layout(margin=dict(t=10,b=10), height=300)
+                st.plotly_chart(fig1, use_container_width=True)
+            with g2:
+                st.markdown("#### Inspecciones por Día")
+                df_dia = df_s.groupby("fecha").size().reset_index(name="inspecciones")
+                fig2 = px.bar(df_dia, x="fecha", y="inspecciones",
+                              color_discrete_sequence=["#2c5364"], text="inspecciones")
+                fig2.update_traces(textposition="outside")
+                fig2.update_layout(margin=dict(t=10,b=10), height=300, xaxis_title="", yaxis_title="Inspecciones")
+                st.plotly_chart(fig2, use_container_width=True)
 
-        if not todas_tarifas:
-            st.info("No hay tarifas registradas aún.")
-        else:
-            df_todas = pd.DataFrame(todas_tarifas)
-            if buscar_orig:
-                df_todas = df_todas[df_todas['Origen'].str.contains(buscar_orig, case=False, na=False)]
-            if buscar_dest:
-                df_todas = df_todas[df_todas['Destino'].str.contains(buscar_dest, case=False, na=False)]
+            st.divider()
+            g3, g4 = st.columns(2)
+            with g3:
+                st.markdown("#### Inspecciones por Máquina")
+                df_maq = df_s.groupby("maquina").size().reset_index(name="inspecciones").sort_values("inspecciones")
+                fig3 = px.bar(df_maq, x="inspecciones", y="maquina", orientation="h",
+                              color="inspecciones", color_continuous_scale="Blues", text="inspecciones")
+                fig3.update_traces(textposition="outside")
+                fig3.update_layout(margin=dict(t=10,b=10), height=max(250,len(df_maq)*45),
+                                   coloraxis_showscale=False, yaxis_title="", xaxis_title="Inspecciones")
+                st.plotly_chart(fig3, use_container_width=True)
+            with g4:
+                st.markdown("#### NC Promedio por Máquina")
+                df_nc_maq = df_s.groupby("maquina").agg(prom_nc=("num_nc","mean")).reset_index().sort_values("prom_nc")
+                df_nc_maq["prom_nc"] = df_nc_maq["prom_nc"].round(1)
+                fig4 = px.bar(df_nc_maq, x="prom_nc", y="maquina", orientation="h",
+                              color="prom_nc", color_continuous_scale="Reds", text="prom_nc")
+                fig4.update_traces(textposition="outside")
+                fig4.update_layout(margin=dict(t=10,b=10), height=max(250,len(df_nc_maq)*45),
+                                   coloraxis_showscale=False, yaxis_title="", xaxis_title="NC promedio")
+                st.plotly_chart(fig4, use_container_width=True)
 
-            df_todas = df_todas.sort_values(['Origen','Destino','Tarifa (COP)'])
-            df_todas_show = df_todas.copy()
-            df_todas_show['Tarifa (COP)'] = df_todas_show['Tarifa (COP)'].apply(lambda x: f"${fmt(x)}")
-            st.dataframe(df_todas_show, use_container_width=True, hide_index=True, height=400)
-            st.caption(f"Total tarifas mostradas: **{len(df_todas)}**")
+            st.divider()
+            g5, g6 = st.columns(2)
+            with g5:
+                st.markdown("#### % Aprobación por Máquina")
+                resumen_apr = df_s.groupby("maquina").apply(lambda g: pd.Series({
+                    "pct_apro": round(g["estado"].str.contains("Aprobada", na=False).sum() / len(g) * 100, 1)
+                })).reset_index().sort_values("pct_apro")
+                fig5 = px.bar(resumen_apr, x="pct_apro", y="maquina", orientation="h",
+                              color="pct_apro", color_continuous_scale="Greens",
+                              text="pct_apro", range_x=[0,100])
+                fig5.update_traces(texttemplate="%{text}%", textposition="outside")
+                fig5.update_layout(margin=dict(t=10,b=10), height=max(250,len(resumen_apr)*45),
+                                   coloraxis_showscale=False, yaxis_title="", xaxis_title="% Aprobación")
+                st.plotly_chart(fig5, use_container_width=True)
+            with g6:
+                st.markdown("#### 📅 Inspecciones por Día de la Semana")
+                df_s["dia_semana"] = pd.to_datetime(df_s["fecha"]).dt.day_name()
+                orden = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+                nombres_es = {"Monday":"Lunes","Tuesday":"Martes","Wednesday":"Miércoles",
+                              "Thursday":"Jueves","Friday":"Viernes","Saturday":"Sábado","Sunday":"Domingo"}
+                df_sem = df_s.groupby("dia_semana").size().reset_index(name="inspecciones")
+                df_sem["orden"] = df_sem["dia_semana"].map({d: i for i, d in enumerate(orden)})
+                df_sem = df_sem.sort_values("orden")
+                df_sem["dia_es"] = df_sem["dia_semana"].map(nombres_es)
+                fig6 = px.bar(df_sem, x="dia_es", y="inspecciones",
+                              color="inspecciones", color_continuous_scale="Oranges", text="inspecciones")
+                fig6.update_traces(textposition="outside")
+                fig6.update_layout(margin=dict(t=10,b=10), height=300,
+                                   coloraxis_showscale=False, xaxis_title="", yaxis_title="Inspecciones")
+                st.plotly_chart(fig6, use_container_width=True)
 
-            if len(df_todas) > 0:
-                st.divider()
-                st.subheader("Comparativo por ruta")
-                rutas_unicas  = df_todas[['Origen','Destino']].drop_duplicates()
-                rutas_labels  = [f"{r['Origen']} → {r['Destino']}" for _, r in rutas_unicas.iterrows()]
-                if rutas_labels:
-                    ruta_sel = st.selectbox("Seleccionar ruta", rutas_labels, key="comp_ruta")
-                    if ruta_sel:
-                        orig_sel, dest_sel = ruta_sel.split(" → ")
-                        df_comp = df_todas[
-                            (df_todas['Origen'] == orig_sel) &
-                            (df_todas['Destino'] == dest_sel)
-                        ].copy()
-                        if not df_comp.empty:
-                            df_comp_show = df_comp[['Cliente','Tarifa (COP)','Tipo vehículo','Vigente']].copy()
-                            df_comp_show['Tarifa (COP)'] = df_comp_show['Tarifa (COP)'].apply(
-                                lambda x: f"${fmt(x)}" if isinstance(x, (int,float)) else x
-                            )
-                            st.dataframe(df_comp_show, use_container_width=True, hide_index=True)
-                            tarifas_num = df_todas[
-                                (df_todas['Origen'] == orig_sel) &
-                                (df_todas['Destino'] == dest_sel)
-                            ]['Tarifa (COP)']
-                            col_comp1, col_comp2, col_comp3 = st.columns(3)
-                            col_comp1.metric("Tarifa mínima", f"${fmt(tarifas_num.min())}")
-                            col_comp2.metric("Tarifa máxima", f"${fmt(tarifas_num.max())}")
-                            col_comp3.metric("Promedio",      f"${fmt(int(tarifas_num.mean()))}")
+            st.divider()
+            st.markdown("#### 🏆 Ranking de Inspectores")
+            df_insp = df_s[
+                df_s["trabajador"].notna() & (df_s["trabajador"].str.strip() != "")
+            ].groupby("trabajador").agg(
+                inspecciones=("trabajador","count"),
+                aprobadas   =("estado", lambda x: x.str.contains("Aprobada",      na=False).sum()),
+                con_obs     =("estado", lambda x: x.str.contains("Observaciones", na=False).sum()),
+                rechazadas  =("estado", lambda x: x.str.contains("Rechazada",     na=False).sum()),
+                total_nc    =("num_nc","sum"),
+            ).reset_index().sort_values("inspecciones", ascending=False).drop_duplicates(subset="trabajador")
+            df_insp["% Aprobación"] = (df_insp["aprobadas"] / df_insp["inspecciones"] * 100).round(1).astype(str) + "%"
+            df_insp["total_nc"]     = df_insp["total_nc"].astype(int)
+            df_insp.columns = ["Inspector","Total","✅ Aprob.","⚠️ Obs.","❌ Rech.","🔴 NC Total","% Aprobación"]
+            st.dataframe(df_insp, use_container_width=True, hide_index=True)
+
+        except ImportError:
+            st.warning("Instala plotly: `pip install plotly`")
+        except Exception as e:
+            st.error(f"Error en dashboard: {e}")
 
 
 if __name__ == "__main__":
