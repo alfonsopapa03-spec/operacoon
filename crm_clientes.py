@@ -22,9 +22,21 @@ SUPABASE_DB_URL = "postgresql://postgres.ogfenizdijcboekqhuhd:Conejito200$@aws-1
 
 # ==================== CATÁLOGO DE MÁQUINAS ====================
 MAQUINAS = [
-    "Máquina 1", "Máquina 2", "Máquina 3", "Máquina 4", "Máquina 5",
-    "Máquina 6", "Máquina 7", "Máquina 8", "Máquina 9", "Máquina 10", "Máquina 11",
+    "Bloquera",
+    "Caldera",
+    "Dobladora",
+    "Enderezadora",
+    "Enmalladora",
+    "Molino",
+    "Montacarga",
+    "Paneladora",
+    "Pantógrafo",
+    "Preexpansora",
+    "Soldador Manual",
 ]
+
+# ==================== DÍAS DE LA SEMANA ====================
+DIAS_SEMANA = ["Lun", "Mar", "Mier", "Juev", "Vier", "Sáb", "Dom"]
 
 # ==================== ÍTEMS DE INSPECCIÓN ====================
 ITEMS_ANTES_USO = [
@@ -96,6 +108,16 @@ st.markdown("""
         margin-bottom: 0.5rem;
     }
     .campo-obligatorio { color: #e74c3c; font-weight: bold; }
+    .dia-header {
+        background: #2c5364; color: white; text-align: center;
+        padding: 4px 0; border-radius: 4px; font-weight: 700;
+        font-size: 0.8rem; margin-bottom: 2px;
+    }
+    .tabla-semanal th {
+        background: #203a43 !important; color: white !important;
+        text-align: center; padding: 6px;
+    }
+    .tabla-semanal td { padding: 4px 6px; vertical-align: middle; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -155,6 +177,8 @@ class DB:
                 CREATE TABLE IF NOT EXISTS inspecciones_preop (
                     id SERIAL PRIMARY KEY,
                     fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
+                    fecha_inicio DATE NOT NULL,
+                    fecha_fin DATE NOT NULL,
                     fecha DATE NOT NULL,
                     maquina TEXT NOT NULL,
                     modelo TEXT,
@@ -168,6 +192,15 @@ class DB:
                     observaciones TEXT
                 )
             """)
+            # Migración suave: agregar columnas si no existen
+            for col_sql in [
+                "ALTER TABLE inspecciones_preop ADD COLUMN IF NOT EXISTS fecha_inicio DATE",
+                "ALTER TABLE inspecciones_preop ADD COLUMN IF NOT EXISTS fecha_fin DATE",
+            ]:
+                try:
+                    cur.execute(col_sql)
+                except Exception:
+                    pass
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS inspecciones_preop_items (
                     id SERIAL PRIMARY KEY,
@@ -175,9 +208,15 @@ class DB:
                     seccion TEXT NOT NULL,
                     item_numero INTEGER NOT NULL,
                     descripcion TEXT NOT NULL,
+                    dia TEXT NOT NULL DEFAULT 'General',
                     resultado TEXT DEFAULT 'C'
                 )
             """)
+            # Migración suave: agregar columna dia si no existe
+            try:
+                cur.execute("ALTER TABLE inspecciones_preop_items ADD COLUMN IF NOT EXISTS dia TEXT NOT NULL DEFAULT 'General'")
+            except Exception:
+                pass
             c.commit()
             cur.close()
         except Exception as e:
@@ -192,12 +231,14 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 INSERT INTO inspecciones_preop
-                (fecha, maquina, modelo, marca, placa, trabajador, revisado_por,
+                (fecha_inicio, fecha_fin, fecha, maquina, modelo, marca, placa, trabajador, revisado_por,
                  cliente_proyecto, responsable_mantenimiento, estado, observaciones)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
-                datos["fecha"], datos["maquina"], datos["modelo"], datos["marca"],
+                datos["fecha_inicio"], datos["fecha_fin"],
+                datos["fecha_inicio"],  # fecha = fecha_inicio para compatibilidad
+                datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
                 datos["estado"], datos["observaciones"],
@@ -206,11 +247,11 @@ class DB:
             for item in items:
                 cur.execute("""
                     INSERT INTO inspecciones_preop_items
-                    (inspeccion_id, seccion, item_numero, descripcion, resultado)
-                    VALUES (%s,%s,%s,%s,%s)
+                    (inspeccion_id, seccion, item_numero, descripcion, dia, resultado)
+                    VALUES (%s,%s,%s,%s,%s,%s)
                 """, (
                     inspeccion_id, item["seccion"], item["item_numero"],
-                    item["descripcion"], item["resultado"]
+                    item["descripcion"], item["dia"], item["resultado"]
                 ))
             c.commit()
             cur.close()
@@ -228,12 +269,15 @@ class DB:
             cur = c.cursor()
             cur.execute("""
                 UPDATE inspecciones_preop SET
-                fecha=%s, maquina=%s, modelo=%s, marca=%s, placa=%s,
+                fecha_inicio=%s, fecha_fin=%s, fecha=%s,
+                maquina=%s, modelo=%s, marca=%s, placa=%s,
                 trabajador=%s, revisado_por=%s, cliente_proyecto=%s,
                 responsable_mantenimiento=%s, estado=%s, observaciones=%s
                 WHERE id=%s
             """, (
-                datos["fecha"], datos["maquina"], datos["modelo"], datos["marca"],
+                datos["fecha_inicio"], datos["fecha_fin"],
+                datos["fecha_inicio"],
+                datos["maquina"], datos["modelo"], datos["marca"],
                 datos["placa"], datos["trabajador"], datos["revisado_por"],
                 datos["cliente_proyecto"], datos["responsable_mantenimiento"],
                 datos["estado"], datos["observaciones"], inspeccion_id
@@ -245,11 +289,11 @@ class DB:
             for item in items:
                 cur.execute("""
                     INSERT INTO inspecciones_preop_items
-                    (inspeccion_id, seccion, item_numero, descripcion, resultado)
-                    VALUES (%s,%s,%s,%s,%s)
+                    (inspeccion_id, seccion, item_numero, descripcion, dia, resultado)
+                    VALUES (%s,%s,%s,%s,%s,%s)
                 """, (
                     inspeccion_id, item["seccion"], item["item_numero"],
-                    item["descripcion"], item["resultado"]
+                    item["descripcion"], item["dia"], item["resultado"]
                 ))
             c.commit()
             cur.close()
@@ -281,7 +325,10 @@ class DB:
         try:
             c = self.conn()
             q = """
-                SELECT id, fecha, maquina, modelo, marca, placa,
+                SELECT id,
+                       COALESCE(fecha_inicio, fecha) AS fecha_inicio,
+                       COALESCE(fecha_fin, fecha)    AS fecha_fin,
+                       fecha, maquina, modelo, marca, placa,
                        trabajador, revisado_por, cliente_proyecto,
                        responsable_mantenimiento, estado, observaciones,
                        fecha_registro
@@ -289,16 +336,16 @@ class DB:
             """
             params = []
             if fecha_ini:
-                q += " AND fecha >= %s"; params.append(fecha_ini)
+                q += " AND COALESCE(fecha_inicio, fecha) >= %s"; params.append(fecha_ini)
             if fecha_fin:
-                q += " AND fecha <= %s"; params.append(fecha_fin)
+                q += " AND COALESCE(fecha_fin, fecha) <= %s"; params.append(fecha_fin)
             if maquina and maquina != "Todas":
                 q += " AND maquina = %s"; params.append(maquina)
             if estado and estado != "Todos":
                 q += " AND estado ILIKE %s"; params.append(f"%{estado}%")
             if trabajador:
                 q += " AND trabajador ILIKE %s"; params.append(f"%{trabajador}%")
-            q += " ORDER BY fecha DESC, id DESC"
+            q += " ORDER BY COALESCE(fecha_inicio, fecha) DESC, id DESC"
             return pd.read_sql(q, c, params=params)
         except Exception as e:
             st.error(f"Error consultando inspecciones: {e}")
@@ -311,10 +358,11 @@ class DB:
         try:
             c = self.conn()
             return pd.read_sql("""
-                SELECT seccion, item_numero, descripcion, resultado
+                SELECT seccion, item_numero, descripcion,
+                       COALESCE(dia, 'General') AS dia, resultado
                 FROM inspecciones_preop_items
                 WHERE inspeccion_id = %s
-                ORDER BY seccion, item_numero
+                ORDER BY seccion, item_numero, dia
             """, c, params=[inspeccion_id])
         except Exception as e:
             st.error(f"Error obteniendo ítems: {e}")
@@ -329,10 +377,11 @@ class DB:
         try:
             c = self.conn()
             return pd.read_sql("""
-                SELECT inspeccion_id, seccion, item_numero, descripcion, resultado
+                SELECT inspeccion_id, seccion, item_numero, descripcion,
+                       COALESCE(dia, 'General') AS dia, resultado
                 FROM inspecciones_preop_items
                 WHERE inspeccion_id = ANY(%s)
-                ORDER BY inspeccion_id, seccion, item_numero
+                ORDER BY inspeccion_id, seccion, item_numero, dia
             """, c, params=[ids])
         except Exception as e:
             st.error(f"Error obteniendo todos los ítems: {e}")
@@ -345,15 +394,18 @@ class DB:
         try:
             c = self.conn()
             return pd.read_sql("""
-                SELECT i.id, i.fecha, i.maquina, i.trabajador, i.estado,
+                SELECT i.id,
+                       COALESCE(i.fecha_inicio, i.fecha) AS fecha,
+                       i.maquina, i.trabajador, i.estado,
                        COUNT(CASE WHEN it.resultado = 'NC' THEN 1 END) as num_nc,
                        COUNT(CASE WHEN it.resultado = 'C'  THEN 1 END) as num_c,
                        COUNT(it.id) as total_items
                 FROM inspecciones_preop i
                 LEFT JOIN inspecciones_preop_items it ON it.inspeccion_id = i.id
-                WHERE i.fecha >= %s AND i.fecha <= %s
-                GROUP BY i.id, i.fecha, i.maquina, i.trabajador, i.estado
-                ORDER BY i.fecha
+                WHERE COALESCE(i.fecha_inicio, i.fecha) >= %s
+                  AND COALESCE(i.fecha_inicio, i.fecha) <= %s
+                GROUP BY i.id, fecha, i.maquina, i.trabajador, i.estado
+                ORDER BY fecha
             """, c, params=[fecha_ini, fecha_fin])
         except Exception as e:
             st.error(f"Error en stats: {e}")
@@ -361,14 +413,14 @@ class DB:
         finally:
             self.release(c)
 
-    def verificar_inspeccion_existente(self, fecha, maquina) -> bool:
+    def verificar_inspeccion_existente(self, fecha_inicio, maquina) -> bool:
         c = None
         try:
             c = self.conn()
             cur = c.cursor()
             cur.execute(
-                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha=%s AND maquina=%s",
-                (fecha, maquina)
+                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha_inicio=%s AND maquina=%s",
+                (fecha_inicio, maquina)
             )
             count = cur.fetchone()[0]
             cur.close()
@@ -380,23 +432,30 @@ class DB:
 
 
 # ==================== HELPERS ====================
-def construir_items(prefix: str) -> list:
+
+def construir_items_semanal(prefix: str, dias_activos: list) -> list:
+    """
+    Construye la lista de ítems considerando cada día activo de la semana.
+    Genera un ítem por (descripción, día).
+    """
     items = []
-    for i, desc in enumerate(ITEMS_ANTES_USO):
-        key = f"{prefix}_au_{i}"
-        resultado = st.session_state.get(key, "C")
-        items.append({"seccion": "ANTES DE SU USO", "item_numero": i + 1,
-                       "descripcion": desc, "resultado": resultado})
-    for i, desc in enumerate(ITEMS_EPP):
-        key = f"{prefix}_epp_{i}"
-        resultado = st.session_state.get(key, "C")
-        items.append({"seccion": "ELEMENTOS DE PROTECCIÓN PERSONAL", "item_numero": i + 1,
-                       "descripcion": desc, "resultado": resultado})
-    for i, desc in enumerate(ITEMS_ELECTRICA):
-        key = f"{prefix}_elec_{i}"
-        resultado = st.session_state.get(key, "C")
-        items.append({"seccion": "SEGURIDAD ELÉCTRICA", "item_numero": i + 1,
-                       "descripcion": desc, "resultado": resultado})
+    secciones = [
+        ("ANTES DE SU USO",                  ITEMS_ANTES_USO, "au"),
+        ("ELEMENTOS DE PROTECCIÓN PERSONAL",  ITEMS_EPP,       "epp"),
+        ("SEGURIDAD ELÉCTRICA",               ITEMS_ELECTRICA, "elec"),
+    ]
+    for sec_nombre, sec_items, sec_key in secciones:
+        for i, desc in enumerate(sec_items):
+            for dia in dias_activos:
+                key = f"{prefix}_{sec_key}_{i}_{dia}"
+                resultado = st.session_state.get(key, "C")
+                items.append({
+                    "seccion":     sec_nombre,
+                    "item_numero": i + 1,
+                    "descripcion": desc,
+                    "dia":         dia,
+                    "resultado":   resultado,
+                })
     return items
 
 
@@ -406,25 +465,53 @@ def badge_resultado(val):
     return "⚪ N/A"
 
 
-def render_items_seccion(seccion_label: str, items_lista: list, prefix: str, sufijo: str,
-                          valores_previos: dict = None):
+def render_tabla_semanal(seccion_label: str, items_lista: list, prefix: str,
+                          sec_key: str, dias_activos: list, valores_previos: dict = None):
+    """
+    Renderiza una tabla semanal: filas = ítems, columnas = días activos.
+    Cada celda tiene un selectbox C / NC / N/A.
+    """
     st.markdown(f"<div class='seccion-titulo'>📋 {seccion_label}</div>", unsafe_allow_html=True)
+    st.caption("**C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
+
+    if not dias_activos:
+        st.warning("Selecciona al menos un día activo para mostrar la tabla.")
+        return
+
+    # Encabezados
+    num_dias = len(dias_activos)
+    # col widths: descripción (ancha) + una por día
+    col_ratios = [4] + [1] * num_dias
+    header_cols = st.columns(col_ratios)
+    header_cols[0].markdown("**Ítem**")
+    for j, dia in enumerate(dias_activos):
+        header_cols[j + 1].markdown(
+            f"<div class='dia-header'>{dia}</div>", unsafe_allow_html=True
+        )
+
+    # Filas de ítems
     for i, desc in enumerate(items_lista):
-        key  = f"{prefix}_{sufijo}_{i}"
-        prev = valores_previos.get(key, "C") if valores_previos else "C"
-        cols = st.columns([0.85, 0.15])
-        with cols[0]:
-            st.markdown(f"<div class='item-label'>{i+1}. {desc}</div>", unsafe_allow_html=True)
-        with cols[1]:
-            st.selectbox(
-                "Resultado", OPCIONES_INSPECCION,
-                index=OPCIONES_INSPECCION.index(prev) if prev in OPCIONES_INSPECCION else 0,
-                key=key, label_visibility="collapsed"
+        row_cols = st.columns(col_ratios)
+        with row_cols[0]:
+            st.markdown(
+                f"<div class='item-label'>{i+1}. {desc}</div>",
+                unsafe_allow_html=True
             )
+        for j, dia in enumerate(dias_activos):
+            key  = f"{prefix}_{sec_key}_{i}_{dia}"
+            prev = "C"
+            if valores_previos:
+                prev = valores_previos.get(key, "C")
+            with row_cols[j + 1]:
+                st.selectbox(
+                    "R", OPCIONES_INSPECCION,
+                    index=OPCIONES_INSPECCION.index(prev) if prev in OPCIONES_INSPECCION else 0,
+                    key=key,
+                    label_visibility="collapsed"
+                )
 
 
 def validar_datos_control(trabajador, revisado_por, cliente_proyecto, resp_mantenimiento) -> list:
-    """Retorna lista de errores. Lista vacía = sin errores."""
     errores = []
     if not trabajador or not trabajador.strip():
         errores.append("👷 **Trabajador** es obligatorio.")
@@ -462,7 +549,6 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
 
     now_col = datetime.now(pytz.timezone("America/Bogota"))
 
-    # ── Una sola query para TODOS los items ──────────────────────────────────
     ids_list = df_inspecciones["id"].astype(int).tolist()
     df_all_items = db.obtener_todos_los_items(ids_list)
     items_por_id = {}
@@ -470,12 +556,10 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         for insp_id, grp in df_all_items.groupby("inspeccion_id"):
             items_por_id[int(insp_id)] = grp
 
-    # =========================================================================
-    # HOJA 1 – RESUMEN INSPECCIONES
-    # =========================================================================
+    # ── HOJA 1: RESUMEN ──────────────────────────────────────────────────────
     ws = wb.active
     ws.title = "Inspecciones"
-    total_cols = 14
+    total_cols = 15
 
     ws.merge_cells(f"A1:{get_column_letter(total_cols)}1")
     ws["A1"] = f"🔧 {titulo}   |   Generado: {now_col.strftime('%d/%m/%Y %H:%M')} (COL)   |   Total: {len(df_inspecciones)} inspecciones"
@@ -486,7 +570,8 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
 
     columnas = [
         ("id",                        "ID",            6),
-        ("fecha",                     "FECHA",         12),
+        ("fecha_inicio",              "F. INICIO",     12),
+        ("fecha_fin",                 "F. FIN",        12),
         ("maquina",                   "MÁQUINA",       20),
         ("modelo",                    "MODELO",        14),
         ("marca",                     "MARCA",         14),
@@ -518,8 +603,13 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         es_obs   = "Observaciones"  in estado_val
         fill_f   = fill_nc_row if es_rech else (fill_obs_row if es_obs else (fill_alt if row_idx % 2 == 0 else None))
 
+        fi_val = str(fila.get("fecha_inicio", fila.get("fecha", "")))
+        ff_val = str(fila.get("fecha_fin",    fila.get("fecha", "")))
+
         valores = {
-            "id": insp_id, "fecha": str(fila.get("fecha","")),
+            "id": insp_id,
+            "fecha_inicio": fi_val,
+            "fecha_fin": ff_val,
             "maquina": fila.get("maquina",""), "modelo": fila.get("modelo",""),
             "marca": fila.get("marca",""), "placa": fila.get("placa",""),
             "trabajador": fila.get("trabajador",""), "revisado_por": fila.get("revisado_por",""),
@@ -533,7 +623,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
             val  = valores.get(key, "")
             cell = ws.cell(row=row_idx, column=col_idx, value=str(val) if val != "" else "")
             cell.border = borde
-            cell.alignment = centro if key in ("id","fecha","estado","num_nc","num_c","placa") else izq
+            cell.alignment = centro if key in ("id","fecha_inicio","fecha_fin","estado","num_nc","num_c","placa") else izq
             if key == "num_nc" and num_nc > 0:
                 cell.font = ft_nc
             elif key == "estado" and "Aprobada" in str(val):
@@ -557,17 +647,15 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ct.font = ft_total; ct.fill = fill_total; ct.alignment = centro
     ws.freeze_panes = "A3"
 
-    # =========================================================================
-    # HOJA 2 – DETALLE ÍTEMS
-    # =========================================================================
+    # ── HOJA 2: DETALLE ÍTEMS (con columna DÍA) ──────────────────────────────
     ws2 = wb.create_sheet("Detalle Ítems")
-    ws2.merge_cells("A1:G1")
-    ws2["A1"] = "Detalle de Ítems por Inspección"
+    ws2.merge_cells("A1:H1")
+    ws2["A1"] = "Detalle de Ítems por Inspección (Semanal)"
     ws2["A1"].font = ft_titulo; ws2["A1"].fill = fill_titulo; ws2["A1"].alignment = centro
     ws2.row_dimensions[1].height = 26
 
-    hdrs2   = ["ID INSP.", "FECHA", "MÁQUINA", "SECCIÓN", "N°", "DESCRIPCIÓN DEL ÍTEM", "RESULTADO"]
-    anchos2 = [8, 12, 20, 30, 5, 70, 10]
+    hdrs2   = ["ID INSP.", "F. INICIO", "F. FIN", "MÁQUINA", "SECCIÓN", "N°", "DESCRIPCIÓN DEL ÍTEM", "DÍA", "RESULTADO"]
+    anchos2 = [8, 12, 12, 20, 30, 5, 65, 8, 10]
     for ci, (h, w) in enumerate(zip(hdrs2, anchos2), start=1):
         c = ws2.cell(2, ci, h)
         c.font = ft_header; c.fill = fill_header; c.alignment = centro; c.border = borde
@@ -580,34 +668,34 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
         df_it   = items_por_id.get(insp_id, pd.DataFrame())
         if df_it.empty:
             continue
+        fi_v = str(insp.get("fecha_inicio", insp.get("fecha", "")))
+        ff_v = str(insp.get("fecha_fin",    insp.get("fecha", "")))
         for _, item in df_it.iterrows():
             res = str(item.get("resultado", "C"))
             fill_item = PatternFill("solid", start_color="FADBD8") if res == "NC" else (
                         PatternFill("solid", start_color="EBF5FB") if fila2 % 2 == 0 else None)
-            vals = [insp_id, str(insp.get("fecha","")), str(insp.get("maquina","")),
+            vals = [insp_id, fi_v, ff_v, str(insp.get("maquina","")),
                     str(item.get("seccion","")), int(item.get("item_numero",0)),
-                    str(item.get("descripcion","")), res]
+                    str(item.get("descripcion","")), str(item.get("dia","General")), res]
             for ci, v in enumerate(vals, start=1):
                 c = ws2.cell(fila2, ci, v)
                 c.font = ft_nc if res == "NC" else ft_normal
                 c.border = borde
-                c.alignment = izq if ci == 6 else centro
+                c.alignment = izq if ci == 7 else centro
                 if fill_item:
                     c.fill = fill_item
             ws2.row_dimensions[fila2].height = 18
             fila2 += 1
     ws2.freeze_panes = "A3"
 
-    # =========================================================================
-    # HOJA 3 – RESUMEN POR MÁQUINA  (CORREGIDO para pandas >= 2.2)
-    # =========================================================================
+    # ── HOJA 3: POR MÁQUINA ──────────────────────────────────────────────────
     ws3 = wb.create_sheet("Por Máquina")
     ws3.merge_cells("A1:H1")
     ws3["A1"] = "Resumen de Inspecciones por Máquina"
     ws3["A1"].font = ft_titulo; ws3["A1"].fill = fill_titulo; ws3["A1"].alignment = centro
     ws3.row_dimensions[1].height = 26
 
-    hdrs3   = ["MÁQUINA","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN","ÚLTIMO INSPECTOR","ÚLTIMA FECHA"]
+    hdrs3   = ["MÁQUINA","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN","ÚLTIMO INSPECTOR","ÚLTIMA SEMANA"]
     anchos3 = [22, 12, 14, 14, 14, 14, 28, 14]
     for ci, (h, w) in enumerate(zip(hdrs3, anchos3), start=1):
         c = ws3.cell(2, ci, h)
@@ -616,18 +704,17 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws3.row_dimensions[2].height = 24
 
     if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
-        # Usamos agg() para evitar el KeyError con pandas >= 2.2
+        fecha_col = "fecha_inicio" if "fecha_inicio" in df_inspecciones.columns else "fecha"
         resumen_maq = df_inspecciones.groupby("maquina", as_index=False).agg(
-            total      =("maquina",  "count"),
-            aprobadas  =("estado",   lambda x: x.str.contains("Aprobada",      na=False).sum()),
-            con_obs    =("estado",   lambda x: x.str.contains("Observaciones",  na=False).sum()),
-            rechazadas =("estado",   lambda x: x.str.contains("Rechazada",      na=False).sum()),
-            ultima_fecha=("fecha",   "max"),
+            total       =("maquina",  "count"),
+            aprobadas   =("estado",   lambda x: x.str.contains("Aprobada",      na=False).sum()),
+            con_obs     =("estado",   lambda x: x.str.contains("Observaciones", na=False).sum()),
+            rechazadas  =("estado",   lambda x: x.str.contains("Rechazada",     na=False).sum()),
+            ultima_fecha=(fecha_col,  "max"),
         ).sort_values("total", ascending=False)
 
-        # Último inspector por máquina (columna separada)
         ultimo_insp_map = (
-            df_inspecciones.sort_values("fecha")
+            df_inspecciones.sort_values(fecha_col)
             .groupby("maquina")["trabajador"]
             .last()
             .reset_index()
@@ -650,17 +737,15 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
             ws3.row_dimensions[i].height = 18
     ws3.freeze_panes = "A3"
 
-    # =========================================================================
-    # HOJA 4 – RANKING NC
-    # =========================================================================
+    # ── HOJA 4: RANKING NC ───────────────────────────────────────────────────
     ws4 = wb.create_sheet("Ranking NC")
-    ws4.merge_cells("A1:D1")
+    ws4.merge_cells("A1:E1")
     ws4["A1"] = "Ranking de No Conformidades por Ítem"
     ws4["A1"].font = ft_titulo; ws4["A1"].fill = fill_titulo; ws4["A1"].alignment = centro
     ws4.row_dimensions[1].height = 26
 
-    hdrs4   = ["SECCIÓN", "DESCRIPCIÓN DEL ÍTEM", "# NC", "% NC"]
-    anchos4 = [30, 75, 8, 10]
+    hdrs4   = ["SECCIÓN", "DESCRIPCIÓN DEL ÍTEM", "DÍA", "# NC", "% NC"]
+    anchos4 = [30, 65, 8, 8, 10]
     for ci, (h, w) in enumerate(zip(hdrs4, anchos4), start=1):
         c = ws4.cell(2, ci, h)
         c.font = ft_header; c.fill = PatternFill("solid", start_color="922B21")
@@ -671,28 +756,25 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     if not df_all_items.empty:
         total_insp = len(df_inspecciones)
         ranking_nc = (
-            df_all_items.groupby(["seccion", "descripcion"], as_index=False)
+            df_all_items.groupby(["seccion", "descripcion", "dia"], as_index=False)
             .agg(num_nc=("resultado", lambda x: (x == "NC").sum()))
             .sort_values("num_nc", ascending=False)
         )
-
         for i, row in enumerate(ranking_nc.itertuples(), start=3):
             pct    = f"{round(row.num_nc / total_insp * 100, 1)}%" if total_insp > 0 else "0%"
             fill_r4 = PatternFill("solid", start_color="FADBD8") if row.num_nc > 0 and i % 2 == 0 else (
                       PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None)
-            vals = [row.seccion, row.descripcion, int(row.num_nc), pct]
+            vals = [row.seccion, row.descripcion, str(row.dia), int(row.num_nc), pct]
             for ci, v in enumerate(vals, start=1):
                 c = ws4.cell(i, ci, v)
-                c.font = ft_nc if row.num_nc > 0 and ci == 3 else ft_normal
+                c.font = ft_nc if row.num_nc > 0 and ci == 4 else ft_normal
                 c.border = borde
                 c.alignment = izq if ci == 2 else centro
                 if fill_r4: c.fill = fill_r4
             ws4.row_dimensions[i].height = 18
     ws4.freeze_panes = "A3"
 
-    # =========================================================================
-    # HOJA 5 – POR INSPECTOR  (CORREGIDO para pandas >= 2.2)
-    # =========================================================================
+    # ── HOJA 5: POR INSPECTOR ────────────────────────────────────────────────
     ws5 = wb.create_sheet("Por Inspector")
     ws5.merge_cells("A1:F1")
     ws5["A1"] = "Resumen por Inspector / Trabajador"
@@ -716,7 +798,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
             resumen_insp = df_trab_filtrado.groupby("trabajador", as_index=False).agg(
                 total      =("trabajador", "count"),
                 aprobadas  =("estado",     lambda x: x.str.contains("Aprobada",      na=False).sum()),
-                con_obs    =("estado",     lambda x: x.str.contains("Observaciones",  na=False).sum()),
+                con_obs    =("estado",     lambda x: x.str.contains("Observaciones", na=False).sum()),
                 rechazadas =("estado",     lambda x: x.str.contains("Rechazada",     na=False).sum()),
             ).sort_values("total", ascending=False)
 
@@ -733,9 +815,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
                 ws5.row_dimensions[i].height = 18
     ws5.freeze_panes = "A3"
 
-    # =========================================================================
-    # HOJA 6 – GRÁFICAS
-    # =========================================================================
+    # ── HOJA 6: GRÁFICAS ─────────────────────────────────────────────────────
     try:
         from openpyxl.chart import PieChart, Reference
         from openpyxl.chart.series import DataPoint
@@ -795,67 +875,129 @@ def main():
     tab1, tab2, tab3 = st.tabs(["📝 Nueva Inspección", "🔍 Historial y Reportes", "📊 Dashboard"])
 
     # =========================================================================
-    # TAB 1 – NUEVA INSPECCIÓN
+    # TAB 1 – NUEVA INSPECCIÓN (SEMANAL)
     # =========================================================================
     with tab1:
-        st.markdown("### Registrar Nueva Inspección Preoperacional")
+        st.markdown("### Registrar Nueva Inspección Preoperacional Semanal")
 
+        # ── 1. Datos del equipo ───────────────────────────────────────────────
         st.markdown("<div class='seccion-titulo'>🏭 1. DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
-        d1, d2, d3, d4, d5 = st.columns(5)
-        with d1: fecha_insp   = st.date_input("📅 Fecha", datetime.now(), key="n_fecha")
-        with d2: maquina_sel  = st.selectbox("⚙️ Máquina", MAQUINAS, key="n_maquina")
-        with d3: modelo_inp   = st.text_input("Modelo",      placeholder="Ej: ZF-200X", key="n_modelo")
-        with d4: marca_inp    = st.text_input("Marca",       placeholder="Ej: SCA",     key="n_marca")
-        with d5: placa_inp    = st.text_input("Placa / Serie", placeholder="Ej: MQ-001", key="n_placa")
+        d1, d2, d3, d4, d5, d6, d7 = st.columns(7)
+        with d1:
+            fecha_ini_insp = st.date_input("📅 Fecha Inicio", datetime.now(), key="n_fecha_ini")
+        with d2:
+            fecha_fin_insp = st.date_input("📅 Fecha Fin",
+                                            datetime.now() + timedelta(days=6),
+                                            key="n_fecha_fin")
+        with d3:
+            maquina_sel = st.selectbox("⚙️ Máquina", MAQUINAS, key="n_maquina")
+        with d4:
+            modelo_inp  = st.text_input("Modelo",       placeholder="Ej: ZF-200X", key="n_modelo")
+        with d5:
+            marca_inp   = st.text_input("Marca",        placeholder="Ej: SCA",     key="n_marca")
+        with d6:
+            placa_inp   = st.text_input("Placa / Serie", placeholder="Ej: MQ-001", key="n_placa")
 
-        if db.verificar_inspeccion_existente(fecha_insp, maquina_sel):
-            st.warning(f"⚠️ Ya existe una inspección para **{maquina_sel}** el **{fecha_insp}**. Si continúas, se registrará una segunda.")
+        # Validar rango de fechas
+        if fecha_fin_insp < fecha_ini_insp:
+            st.error("⚠️ La fecha de fin no puede ser anterior a la fecha de inicio.")
+            return
 
-        st.markdown("<div class='seccion-titulo'>🔍 2. LISTA DE ACTIVIDADES — ANTES DE SU USO</div>",
-                    unsafe_allow_html=True)
-        st.caption("Selecciona **C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
-        render_items_seccion("ANTES DE SU USO",                    ITEMS_ANTES_USO, "new", "au")
-        render_items_seccion("🦺 3A. ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP, "new", "epp")
-        render_items_seccion("⚡ 3B. SEGURIDAD ELÉCTRICA",      ITEMS_ELECTRICA,   "new", "elec")
+        # Calcular días entre las fechas (máx 7)
+        delta_dias = (fecha_fin_insp - fecha_ini_insp).days + 1
+        if delta_dias > 7:
+            st.warning("⚠️ El rango seleccionado supera 7 días. Se mostrarán solo los primeros 7.")
+            delta_dias = 7
 
-        st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: trabajador_inp = st.text_input("👷 Trabajador *",          placeholder="Nombre del operario",    key="n_trab")
-        with c2: revisado_inp   = st.text_input("👤 Revisado por *",        placeholder="Supervisor / Jefe",      key="n_rev")
-        with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto *",  placeholder="Nombre del proyecto",    key="n_cli")
-        with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento *", placeholder="Nombre del responsable", key="n_mant")
+        # Generar lista de días con su nombre corto
+        dias_labels = []
+        dias_nombres_es = ["Lun", "Mar", "Mier", "Juev", "Vier", "Sáb", "Dom"]
+        for i in range(delta_dias):
+            d = fecha_ini_insp + timedelta(days=i)
+            nombre_dia = dias_nombres_es[d.weekday()]
+            dias_labels.append(f"{nombre_dia} {d.strftime('%d/%m')}")
 
-        e1, e2 = st.columns([1, 3])
-        with e1: estado_inp = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, key="n_estado")
-        with e2: obs_inp    = st.text_area("💬 Comentarios / Observaciones",
-                                            placeholder="Describa cualquier anomalía. REPORTAR INMEDIATAMENTE al encargado de equipos y al departamento de mantenimiento.",
-                                            height=90, key="n_obs")
+        # ── Selector de días activos ──────────────────────────────────────────
+        st.markdown("<div class='seccion-titulo'>📅 2. DÍAS TRABAJADOS EN LA SEMANA</div>", unsafe_allow_html=True)
+        st.caption("Marca los días en que la máquina fue operada (se generará una columna por cada día seleccionado)")
 
-        st.divider()
-        if st.button("💾 Guardar Inspección", type="primary", use_container_width=True, key="btn_guardar"):
-            errores = validar_datos_control(trabajador_inp, revisado_inp, cliente_inp, resp_mant_inp)
-            if not maquina_sel:
-                errores.insert(0, "⚙️ La **Máquina** es obligatoria.")
-            if errores:
-                st.error("❌ Por favor completa los siguientes campos obligatorios:")
-                for err in errores:
-                    st.markdown(f"- {err}")
-            else:
-                items_form = construir_items("new")
-                datos = {
-                    "fecha": fecha_insp, "maquina": maquina_sel,
-                    "modelo": modelo_inp, "marca": marca_inp, "placa": placa_inp,
-                    "trabajador": trabajador_inp.strip(), "revisado_por": revisado_inp.strip(),
-                    "cliente_proyecto": cliente_inp.strip(), "responsable_mantenimiento": resp_mant_inp.strip(),
-                    "estado": estado_inp.split(" ", 1)[1] if " " in estado_inp else estado_inp,
-                    "observaciones": obs_inp,
-                }
-                nc_count = sum(1 for it in items_form if it["resultado"] == "NC")
-                if db.guardar_inspeccion(datos, items_form):
-                    st.success(f"✅ Inspección guardada — {maquina_sel} | {fecha_insp} | {nc_count} NC detectadas")
-                    if nc_count > 0:
-                        st.warning(f"⚠️ Se detectaron **{nc_count} No Conformidades**. Reportar al encargado de mantenimiento.")
-                    st.balloons()
+        cols_dias = st.columns(len(dias_labels))
+        dias_activos = []
+        for j, label in enumerate(dias_labels):
+            with cols_dias[j]:
+                activo = st.checkbox(label, value=True, key=f"n_dia_{j}")
+                if activo:
+                    dias_activos.append(label)
+
+        if not dias_activos:
+            st.warning("Selecciona al menos un día trabajado.")
+        else:
+            if db.verificar_inspeccion_existente(fecha_ini_insp, maquina_sel):
+                st.warning(f"⚠️ Ya existe una inspección para **{maquina_sel}** iniciando el **{fecha_ini_insp}**. Si continúas, se registrará una segunda.")
+
+            # ── Tablas de inspección (una por sección, columnas = días) ──────
+            st.markdown("<div class='seccion-titulo'>🔍 3. LISTA DE ACTIVIDADES — ANTES DE SU USO</div>",
+                        unsafe_allow_html=True)
+            render_tabla_semanal("ANTES DE SU USO", ITEMS_ANTES_USO,
+                                  "new", "au", dias_activos)
+
+            render_tabla_semanal("🦺 ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP,
+                                  "new", "epp", dias_activos)
+
+            render_tabla_semanal("⚡ SEGURIDAD ELÉCTRICA", ITEMS_ELECTRICA,
+                                  "new", "elec", dias_activos)
+
+            # ── Datos de control ─────────────────────────────────────────────
+            st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>",
+                        unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: trabajador_inp = st.text_input("👷 Trabajador *",          placeholder="Nombre del operario",    key="n_trab")
+            with c2: revisado_inp   = st.text_input("👤 Revisado por *",        placeholder="Supervisor / Jefe",      key="n_rev")
+            with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto *",  placeholder="Nombre del proyecto",    key="n_cli")
+            with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento *", placeholder="Nombre del responsable", key="n_mant")
+
+            e1, e2 = st.columns([1, 3])
+            with e1: estado_inp = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, key="n_estado")
+            with e2: obs_inp    = st.text_area(
+                "💬 Comentarios / Observaciones",
+                placeholder="Describa cualquier anomalía. REPORTAR INMEDIATAMENTE al encargado de equipos y al departamento de mantenimiento.",
+                height=90, key="n_obs")
+
+            st.divider()
+            if st.button("💾 Guardar Inspección Semanal", type="primary",
+                          use_container_width=True, key="btn_guardar"):
+                errores = validar_datos_control(trabajador_inp, revisado_inp, cliente_inp, resp_mant_inp)
+                if not maquina_sel:
+                    errores.insert(0, "⚙️ La **Máquina** es obligatoria.")
+                if errores:
+                    st.error("❌ Por favor completa los siguientes campos obligatorios:")
+                    for err in errores:
+                        st.markdown(f"- {err}")
+                else:
+                    items_form = construir_items_semanal("new", dias_activos)
+                    datos = {
+                        "fecha_inicio": fecha_ini_insp,
+                        "fecha_fin":    fecha_fin_insp,
+                        "maquina":      maquina_sel,
+                        "modelo":       modelo_inp,
+                        "marca":        marca_inp,
+                        "placa":        placa_inp,
+                        "trabajador":   trabajador_inp.strip(),
+                        "revisado_por": revisado_inp.strip(),
+                        "cliente_proyecto":          cliente_inp.strip(),
+                        "responsable_mantenimiento": resp_mant_inp.strip(),
+                        "estado":        estado_inp.split(" ", 1)[1] if " " in estado_inp else estado_inp,
+                        "observaciones": obs_inp,
+                    }
+                    nc_count = sum(1 for it in items_form if it["resultado"] == "NC")
+                    if db.guardar_inspeccion(datos, items_form):
+                        st.success(
+                            f"✅ Inspección semanal guardada — {maquina_sel} | "
+                            f"{fecha_ini_insp} → {fecha_fin_insp} | {nc_count} NC detectadas"
+                        )
+                        if nc_count > 0:
+                            st.warning(f"⚠️ Se detectaron **{nc_count} No Conformidades**. Reportar al encargado de mantenimiento.")
+                        st.balloons()
 
     # =========================================================================
     # TAB 2 – HISTORIAL
@@ -904,7 +1046,7 @@ def main():
                 )
 
             st.divider()
-            cols_tabla = ["id","fecha","maquina","trabajador","revisado_por",
+            cols_tabla = ["id","fecha_inicio","fecha_fin","maquina","trabajador","revisado_por",
                           "cliente_proyecto","placa","estado","observaciones"]
             cols_ex = [c for c in cols_tabla if c in df_hist.columns]
             st.dataframe(df_hist[cols_ex], use_container_width=True, hide_index=True)
@@ -912,7 +1054,11 @@ def main():
             st.divider()
             st.subheader("✏️ Ver Detalle / Editar")
             df_hist["_label"] = df_hist.apply(
-                lambda r: f"ID {r['id']} | {r['fecha']} | {r['maquina']} | {r.get('trabajador','')} | {r.get('estado','')}",
+                lambda r: (
+                    f"ID {r['id']} | {r.get('fecha_inicio', r.get('fecha',''))} → "
+                    f"{r.get('fecha_fin', r.get('fecha',''))} | {r['maquina']} | "
+                    f"{r.get('trabajador','')} | {r.get('estado','')}"
+                ),
                 axis=1
             )
             sel = st.selectbox("Seleccionar inspección:", df_hist["_label"].tolist(), key="h_sel")
@@ -928,7 +1074,9 @@ def main():
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.info(f"**Máquina:** {row['maquina']}")
-                        st.write(f"**Fecha:** {row['fecha']}")
+                        fi_disp = row.get('fecha_inicio', row.get('fecha',''))
+                        ff_disp = row.get('fecha_fin',    row.get('fecha',''))
+                        st.write(f"**Semana:** {fi_disp} → {ff_disp}")
                         st.write(f"**Modelo:** {row.get('modelo','')}")
                         st.write(f"**Marca:** {row.get('marca','')}")
                         st.write(f"**Placa/Serie:** {row.get('placa','')}")
@@ -947,11 +1095,29 @@ def main():
                         num_nc = len(df_items_sel[df_items_sel["resultado"] == "NC"])
                         num_c  = len(df_items_sel[df_items_sel["resultado"] == "C"])
                         st.write(f"**Resultado ítems:** 🟢 {num_c} Conformes · 🔴 {num_nc} No Conformes")
+
+                        # Mostrar tabla pivote por día
                         for sec in df_items_sel["seccion"].unique():
-                            items_sec = df_items_sel[df_items_sel["seccion"] == sec]
+                            items_sec = df_items_sel[df_items_sel["seccion"] == sec].copy()
                             st.markdown(f"**{sec}**")
-                            for _, it in items_sec.iterrows():
-                                st.markdown(f"&nbsp;&nbsp;&nbsp;{it['item_numero']}. {it['descripcion']} → **{badge_resultado(it['resultado'])}**")
+                            dias_unicos = items_sec["dia"].unique().tolist()
+                            col_r = [4] + [1] * len(dias_unicos)
+                            hh = st.columns(col_r)
+                            hh[0].markdown("**Ítem**")
+                            for j, d in enumerate(dias_unicos):
+                                hh[j+1].markdown(f"<div class='dia-header'>{d}</div>", unsafe_allow_html=True)
+                            for item_num in items_sec["item_numero"].unique():
+                                fila_i = items_sec[items_sec["item_numero"] == item_num]
+                                desc_i = fila_i.iloc[0]["descripcion"]
+                                rr = st.columns(col_r)
+                                with rr[0]:
+                                    st.markdown(f"<div class='item-label'>{item_num}. {desc_i}</div>",
+                                                unsafe_allow_html=True)
+                                for j, d in enumerate(dias_unicos):
+                                    res_d = fila_i[fila_i["dia"] == d]["resultado"].values
+                                    val_d = res_d[0] if len(res_d) > 0 else "—"
+                                    with rr[j+1]:
+                                        st.write(badge_resultado(val_d))
 
                     bc1, bc2 = st.columns(2)
                     with bc1:
@@ -969,41 +1135,79 @@ def main():
                     st.markdown(f"#### ✏️ Editando inspección ID {vid}")
                     st.caption("Los campos marcados con * son obligatorios")
 
+                    # Reconstruir días activos previos desde los ítems guardados
+                    dias_previos = []
+                    if not df_items_sel.empty:
+                        dias_previos = df_items_sel["dia"].unique().tolist()
+
                     prev_vals = {}
                     if not df_items_sel.empty:
+                        sec_map = {
+                            "ANTES DE SU USO":                 ("au",   ITEMS_ANTES_USO),
+                            "ELEMENTOS DE PROTECCIÓN PERSONAL": ("epp",  ITEMS_EPP),
+                            "SEGURIDAD ELÉCTRICA":             ("elec", ITEMS_ELECTRICA),
+                        }
                         for _, it in df_items_sel.iterrows():
-                            sec   = it["seccion"]
-                            idx_i = int(it["item_numero"]) - 1
-                            if sec == "ANTES DE SU USO":
-                                prev_vals[f"edit_{vid}_au_{idx_i}"]   = it["resultado"]
-                            elif "PROTECCIÓN" in sec:
-                                prev_vals[f"edit_{vid}_epp_{idx_i}"]  = it["resultado"]
-                            elif "ELÉCTRICA" in sec:
-                                prev_vals[f"edit_{vid}_elec_{idx_i}"] = it["resultado"]
+                            sec_key_map = sec_map.get(it["seccion"])
+                            if sec_key_map:
+                                sec_k, sec_list = sec_key_map
+                                idx_i = int(it["item_numero"]) - 1
+                                dia_v = it.get("dia", "General")
+                                prev_vals[f"edit_{vid}_{sec_k}_{idx_i}_{dia_v}"] = it["resultado"]
 
                     # Datos del equipo
                     st.markdown("<div class='seccion-titulo'>🏭 DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
-                    ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                    ec1, ec2, ec3, ec4, ec5, ec6, ec7 = st.columns(7)
                     with ec1:
-                        e_fecha  = st.date_input("📅 Fecha", value=row["fecha"], key=f"ef_{vid}")
+                        fi_prev = row.get("fecha_inicio", row.get("fecha", date.today()))
+                        e_fecha_ini = st.date_input("📅 Fecha Inicio", value=fi_prev, key=f"efi_{vid}")
                     with ec2:
+                        ff_prev = row.get("fecha_fin", row.get("fecha", date.today()))
+                        e_fecha_fin = st.date_input("📅 Fecha Fin",   value=ff_prev, key=f"eff_{vid}")
+                    with ec3:
                         maq_idx = MAQUINAS.index(row["maquina"]) if row["maquina"] in MAQUINAS else 0
                         e_maq   = st.selectbox("⚙️ Máquina", MAQUINAS, index=maq_idx, key=f"em_{vid}")
-                    with ec3:
-                        e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
                     with ec4:
-                        e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
+                        e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
                     with ec5:
+                        e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
+                    with ec6:
                         e_placa  = st.text_input("Placa",  value=str(row.get("placa", "") or ""), key=f"eplaca_{vid}")
 
-                    # Ítems de inspección
-                    st.caption("Selecciona **C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
-                    render_items_seccion("ANTES DE SU USO",                    ITEMS_ANTES_USO, f"edit_{vid}", "au",   prev_vals)
-                    render_items_seccion("ELEMENTOS DE PROTECCIÓN PERSONAL",   ITEMS_EPP,       f"edit_{vid}", "epp",  prev_vals)
-                    render_items_seccion("SEGURIDAD ELÉCTRICA",                ITEMS_ELECTRICA, f"edit_{vid}", "elec", prev_vals)
+                    # Días activos en edición
+                    if e_fecha_fin < e_fecha_ini:
+                        st.error("La fecha fin no puede ser anterior a la fecha inicio.")
+                    else:
+                        delta_e = (e_fecha_fin - e_fecha_ini).days + 1
+                        if delta_e > 7: delta_e = 7
+                        dias_nombres_es = ["Lun", "Mar", "Mier", "Juev", "Vier", "Sáb", "Dom"]
+                        dias_labels_e = []
+                        for i in range(delta_e):
+                            d = e_fecha_ini + timedelta(days=i)
+                            dias_labels_e.append(f"{dias_nombres_es[d.weekday()]} {d.strftime('%d/%m')}")
 
-                    # Datos de control (OBLIGATORIOS)
-                    st.markdown("<div class='seccion-titulo'>📋 DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>", unsafe_allow_html=True)
+                        st.markdown("<div class='seccion-titulo'>📅 DÍAS TRABAJADOS</div>", unsafe_allow_html=True)
+                        cols_de = st.columns(len(dias_labels_e))
+                        dias_activos_e = []
+                        for j, label in enumerate(dias_labels_e):
+                            with cols_de[j]:
+                                activo = st.checkbox(label, value=(label in dias_previos or True),
+                                                     key=f"edit_{vid}_dia_{j}")
+                                if activo:
+                                    dias_activos_e.append(label)
+
+                        if dias_activos_e:
+                            st.caption("Selecciona **C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
+                            render_tabla_semanal("ANTES DE SU USO",                  ITEMS_ANTES_USO,
+                                                  f"edit_{vid}", "au",   dias_activos_e, prev_vals)
+                            render_tabla_semanal("ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP,
+                                                  f"edit_{vid}", "epp",  dias_activos_e, prev_vals)
+                            render_tabla_semanal("SEGURIDAD ELÉCTRICA",              ITEMS_ELECTRICA,
+                                                  f"edit_{vid}", "elec", dias_activos_e, prev_vals)
+
+                    # Datos de control
+                    st.markdown("<div class='seccion-titulo'>📋 DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>",
+                                unsafe_allow_html=True)
                     ee1, ee2, ee3, ee4 = st.columns(4)
                     with ee1:
                         e_trab = st.text_input("👷 Trabajador *",       value=str(row.get("trabajador","")                or ""), key=f"etrab_{vid}")
@@ -1016,7 +1220,6 @@ def main():
 
                     estados_l  = [e.split(" ", 1)[1] for e in ESTADOS_INSPECCION]
                     est_actual = str(row.get("estado") or "Aprobada")
-                    # Buscar coincidencia parcial para robustez
                     est_idx = 0
                     for idx_e, est_opt in enumerate(estados_l):
                         if est_actual in est_opt or est_opt in est_actual:
@@ -1046,9 +1249,10 @@ def main():
                             for err in errores_edit:
                                 st.markdown(f"- {err}")
                         else:
-                            items_edit = construir_items(f"edit_{vid}")
+                            items_edit = construir_items_semanal(f"edit_{vid}", dias_activos_e)
                             datos_edit = {
-                                "fecha": e_fecha, "maquina": e_maq, "modelo": e_modelo,
+                                "fecha_inicio": e_fecha_ini, "fecha_fin": e_fecha_fin,
+                                "maquina": e_maq, "modelo": e_modelo,
                                 "marca": e_marca, "placa": e_placa,
                                 "trabajador": e_trab.strip(), "revisado_por": e_rev.strip(),
                                 "cliente_proyecto": e_cli.strip(), "responsable_mantenimiento": e_mant.strip(),
@@ -1118,7 +1322,7 @@ def main():
                 fig1.update_layout(margin=dict(t=10,b=10), height=300)
                 st.plotly_chart(fig1, use_container_width=True)
             with g2:
-                st.markdown("#### Inspecciones por Día")
+                st.markdown("#### Inspecciones por Semana (Fecha Inicio)")
                 df_dia = df_s.groupby("fecha").size().reset_index(name="inspecciones")
                 fig2 = px.bar(df_dia, x="fecha", y="inspecciones",
                               color_discrete_sequence=["#2c5364"], text="inspecciones")
