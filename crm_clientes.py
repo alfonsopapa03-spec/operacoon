@@ -18,7 +18,6 @@ st.set_page_config(
 )
 
 # ==================== CREDENCIALES ====================
-# ⚠️ Recomendado: mover a st.secrets o variables de entorno en producción
 SUPABASE_DB_URL = "postgresql://postgres.ogfenizdijcboekqhuhd:Conejito200$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
 # ==================== CATÁLOGO DE MÁQUINAS ====================
@@ -96,6 +95,7 @@ st.markdown("""
         border-left: 5px solid #2c5364; box-shadow: 0 2px 8px rgba(0,0,0,0.07);
         margin-bottom: 0.5rem;
     }
+    .campo-obligatorio { color: #e74c3c; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,10 +103,6 @@ st.markdown("""
 # ==================== BASE DE DATOS ====================
 @st.cache_resource
 def get_pool():
-    """
-    Crea el pool de conexiones UNA sola vez para toda la sesión de Streamlit.
-    sslmode='require' es obligatorio para Supabase Cloud.
-    """
     try:
         connection_pool = pg_pool.SimpleConnectionPool(
             minconn=1,
@@ -128,14 +124,11 @@ class DB:
         self.init()
 
     def conn(self):
-        """Obtiene una conexión del pool con reconexión automática."""
         try:
             c = self.pool.getconn()
-            # Verificar que la conexión sigue activa
             c.cursor().execute("SELECT 1")
             return c
         except Exception:
-            # La conexión estaba muerta: crear una nueva directamente
             try:
                 return psycopg2.connect(
                     dsn=SUPABASE_DB_URL,
@@ -147,7 +140,6 @@ class DB:
                 st.stop()
 
     def release(self, c):
-        """Devuelve la conexión al pool de forma segura."""
         try:
             if c and not c.closed:
                 self.pool.putconn(c)
@@ -168,10 +160,10 @@ class DB:
                     modelo TEXT,
                     marca TEXT,
                     placa TEXT,
-                    trabajador TEXT,
-                    revisado_por TEXT,
-                    cliente_proyecto TEXT,
-                    responsable_mantenimiento TEXT,
+                    trabajador TEXT NOT NULL,
+                    revisado_por TEXT NOT NULL,
+                    cliente_proyecto TEXT NOT NULL,
+                    responsable_mantenimiento TEXT NOT NULL,
                     estado TEXT DEFAULT 'Aprobada',
                     observaciones TEXT
                 )
@@ -331,7 +323,6 @@ class DB:
             self.release(c)
 
     def obtener_todos_los_items(self, ids: list) -> pd.DataFrame:
-        """Una sola query para obtener items de múltiples inspecciones (para Excel)."""
         if not ids:
             return pd.DataFrame()
         c = None
@@ -432,6 +423,20 @@ def render_items_seccion(seccion_label: str, items_lista: list, prefix: str, suf
             )
 
 
+def validar_datos_control(trabajador, revisado_por, cliente_proyecto, resp_mantenimiento) -> list:
+    """Retorna lista de errores. Lista vacía = sin errores."""
+    errores = []
+    if not trabajador or not trabajador.strip():
+        errores.append("👷 **Trabajador** es obligatorio.")
+    if not revisado_por or not revisado_por.strip():
+        errores.append("👤 **Revisado por** es obligatorio.")
+    if not cliente_proyecto or not cliente_proyecto.strip():
+        errores.append("🏢 **Cliente / Proyecto** es obligatorio.")
+    if not resp_mantenimiento or not resp_mantenimiento.strip():
+        errores.append("🔧 **Responsable de Mantenimiento** es obligatorio.")
+    return errores
+
+
 # ==================== EXCEL ====================
 def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspecciones Preoperacionales") -> bytes:
     wb = Workbook()
@@ -457,7 +462,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
 
     now_col = datetime.now(pytz.timezone("America/Bogota"))
 
-    # ── Una sola query para TODOS los items (eficiente) ──────────────────────
+    # ── Una sola query para TODOS los items ──────────────────────────────────
     ids_list = df_inspecciones["id"].astype(int).tolist()
     df_all_items = db.obtener_todos_los_items(ids_list)
     items_por_id = {}
@@ -594,7 +599,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws2.freeze_panes = "A3"
 
     # =========================================================================
-    # HOJA 3 – RESUMEN POR MÁQUINA
+    # HOJA 3 – RESUMEN POR MÁQUINA  (CORREGIDO para pandas >= 2.2)
     # =========================================================================
     ws3 = wb.create_sheet("Por Máquina")
     ws3.merge_cells("A1:H1")
@@ -611,21 +616,32 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws3.row_dimensions[2].height = 24
 
     if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
-        resumen_maq = df_inspecciones.groupby("maquina").apply(lambda g: pd.Series({
-            "total":       len(g),
-            "aprobadas":   g["estado"].str.contains("Aprobada",      na=False).sum(),
-            "con_obs":     g["estado"].str.contains("Observaciones",  na=False).sum(),
-            "rechazadas":  g["estado"].str.contains("Rechazada",      na=False).sum(),
-            "ultimo_insp": g.sort_values("fecha").iloc[-1]["trabajador"] if len(g) > 0 else "",
-            "ultima_fecha":str(g["fecha"].max()),
-        })).reset_index().sort_values("total", ascending=False)
+        # Usamos agg() para evitar el KeyError con pandas >= 2.2
+        resumen_maq = df_inspecciones.groupby("maquina", as_index=False).agg(
+            total      =("maquina",  "count"),
+            aprobadas  =("estado",   lambda x: x.str.contains("Aprobada",      na=False).sum()),
+            con_obs    =("estado",   lambda x: x.str.contains("Observaciones",  na=False).sum()),
+            rechazadas =("estado",   lambda x: x.str.contains("Rechazada",      na=False).sum()),
+            ultima_fecha=("fecha",   "max"),
+        ).sort_values("total", ascending=False)
+
+        # Último inspector por máquina (columna separada)
+        ultimo_insp_map = (
+            df_inspecciones.sort_values("fecha")
+            .groupby("maquina")["trabajador"]
+            .last()
+            .reset_index()
+            .rename(columns={"trabajador": "ultimo_insp"})
+        )
+        resumen_maq = resumen_maq.merge(ultimo_insp_map, on="maquina", how="left")
+        resumen_maq["ultima_fecha"] = resumen_maq["ultima_fecha"].astype(str)
 
         for i, row in enumerate(resumen_maq.itertuples(), start=3):
             pct    = f"{round(row.aprobadas / row.total * 100, 1)}%" if row.total > 0 else "0%"
             fill_r = PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None
             vals   = [row.maquina, int(row.total), int(row.aprobadas),
                       int(row.con_obs), int(row.rechazadas), pct,
-                      str(row.ultimo_insp), str(row.ultima_fecha)]
+                      str(row.ultimo_insp) if row.ultimo_insp else "", str(row.ultima_fecha)]
             for ci, v in enumerate(vals, start=1):
                 c = ws3.cell(i, ci, v)
                 c.font = ft_normal; c.border = borde
@@ -654,9 +670,11 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
 
     if not df_all_items.empty:
         total_insp = len(df_inspecciones)
-        ranking_nc = df_all_items.groupby(["seccion","descripcion"]).apply(
-            lambda g: pd.Series({"num_nc": (g["resultado"] == "NC").sum()})
-        ).reset_index().sort_values("num_nc", ascending=False)
+        ranking_nc = (
+            df_all_items.groupby(["seccion", "descripcion"], as_index=False)
+            .agg(num_nc=("resultado", lambda x: (x == "NC").sum()))
+            .sort_values("num_nc", ascending=False)
+        )
 
         for i, row in enumerate(ranking_nc.itertuples(), start=3):
             pct    = f"{round(row.num_nc / total_insp * 100, 1)}%" if total_insp > 0 else "0%"
@@ -673,7 +691,7 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws4.freeze_panes = "A3"
 
     # =========================================================================
-    # HOJA 5 – POR INSPECTOR
+    # HOJA 5 – POR INSPECTOR  (CORREGIDO para pandas >= 2.2)
     # =========================================================================
     ws5 = wb.create_sheet("Por Inspector")
     ws5.merge_cells("A1:F1")
@@ -691,26 +709,28 @@ def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspec
     ws5.row_dimensions[2].height = 24
 
     if not df_inspecciones.empty and "trabajador" in df_inspecciones.columns:
-        resumen_insp = df_inspecciones[
+        df_trab_filtrado = df_inspecciones[
             df_inspecciones["trabajador"].notna() & (df_inspecciones["trabajador"].str.strip() != "")
-        ].groupby("trabajador").apply(lambda g: pd.Series({
-            "total":      len(g),
-            "aprobadas":  g["estado"].str.contains("Aprobada",      na=False).sum(),
-            "con_obs":    g["estado"].str.contains("Observaciones",  na=False).sum(),
-            "rechazadas": g["estado"].str.contains("Rechazada",     na=False).sum(),
-        })).reset_index().sort_values("total", ascending=False)
+        ]
+        if not df_trab_filtrado.empty:
+            resumen_insp = df_trab_filtrado.groupby("trabajador", as_index=False).agg(
+                total      =("trabajador", "count"),
+                aprobadas  =("estado",     lambda x: x.str.contains("Aprobada",      na=False).sum()),
+                con_obs    =("estado",     lambda x: x.str.contains("Observaciones",  na=False).sum()),
+                rechazadas =("estado",     lambda x: x.str.contains("Rechazada",     na=False).sum()),
+            ).sort_values("total", ascending=False)
 
-        for i, row in enumerate(resumen_insp.itertuples(), start=3):
-            pct    = f"{round(row.aprobadas / row.total * 100, 1)}%" if row.total > 0 else "0%"
-            fill_r = PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None
-            vals   = [row.trabajador, int(row.total), int(row.aprobadas),
-                      int(row.con_obs), int(row.rechazadas), pct]
-            for ci, v in enumerate(vals, start=1):
-                c = ws5.cell(i, ci, v)
-                c.font = ft_normal; c.border = borde
-                c.alignment = izq if ci == 1 else centro
-                if fill_r: c.fill = fill_r
-            ws5.row_dimensions[i].height = 18
+            for i, row in enumerate(resumen_insp.itertuples(), start=3):
+                pct    = f"{round(row.aprobadas / row.total * 100, 1)}%" if row.total > 0 else "0%"
+                fill_r = PatternFill("solid", start_color="EBF5FB") if i % 2 == 0 else None
+                vals   = [row.trabajador, int(row.total), int(row.aprobadas),
+                          int(row.con_obs), int(row.rechazadas), pct]
+                for ci, v in enumerate(vals, start=1):
+                    c = ws5.cell(i, ci, v)
+                    c.font = ft_normal; c.border = borde
+                    c.alignment = izq if ci == 1 else centro
+                    if fill_r: c.fill = fill_r
+                ws5.row_dimensions[i].height = 18
     ws5.freeze_panes = "A3"
 
     # =========================================================================
@@ -798,12 +818,12 @@ def main():
         render_items_seccion("🦺 3A. ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP, "new", "epp")
         render_items_seccion("⚡ 3B. SEGURIDAD ELÉCTRICA",      ITEMS_ELECTRICA,   "new", "elec")
 
-        st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL</div>", unsafe_allow_html=True)
+        st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
-        with c1: trabajador_inp = st.text_input("👷 Trabajador",          placeholder="Nombre del operario",    key="n_trab")
-        with c2: revisado_inp   = st.text_input("👤 Revisado por",        placeholder="Supervisor / Jefe",      key="n_rev")
-        with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto",  placeholder="Nombre del proyecto",    key="n_cli")
-        with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento", placeholder="Nombre del responsable", key="n_mant")
+        with c1: trabajador_inp = st.text_input("👷 Trabajador *",          placeholder="Nombre del operario",    key="n_trab")
+        with c2: revisado_inp   = st.text_input("👤 Revisado por *",        placeholder="Supervisor / Jefe",      key="n_rev")
+        with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto *",  placeholder="Nombre del proyecto",    key="n_cli")
+        with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento *", placeholder="Nombre del responsable", key="n_mant")
 
         e1, e2 = st.columns([1, 3])
         with e1: estado_inp = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, key="n_estado")
@@ -813,15 +833,20 @@ def main():
 
         st.divider()
         if st.button("💾 Guardar Inspección", type="primary", use_container_width=True, key="btn_guardar"):
+            errores = validar_datos_control(trabajador_inp, revisado_inp, cliente_inp, resp_mant_inp)
             if not maquina_sel:
-                st.error("⚠️ La máquina es obligatoria.")
+                errores.insert(0, "⚙️ La **Máquina** es obligatoria.")
+            if errores:
+                st.error("❌ Por favor completa los siguientes campos obligatorios:")
+                for err in errores:
+                    st.markdown(f"- {err}")
             else:
                 items_form = construir_items("new")
                 datos = {
                     "fecha": fecha_insp, "maquina": maquina_sel,
                     "modelo": modelo_inp, "marca": marca_inp, "placa": placa_inp,
-                    "trabajador": trabajador_inp, "revisado_por": revisado_inp,
-                    "cliente_proyecto": cliente_inp, "responsable_mantenimiento": resp_mant_inp,
+                    "trabajador": trabajador_inp.strip(), "revisado_por": revisado_inp.strip(),
+                    "cliente_proyecto": cliente_inp.strip(), "responsable_mantenimiento": resp_mant_inp.strip(),
                     "estado": estado_inp.split(" ", 1)[1] if " " in estado_inp else estado_inp,
                     "observaciones": obs_inp,
                 }
@@ -899,6 +924,7 @@ def main():
                 df_items_sel   = db.obtener_items_inspeccion(vid)
 
                 if not editando:
+                    # ── MODO VISTA ──
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.info(f"**Máquina:** {row['maquina']}")
@@ -929,17 +955,20 @@ def main():
 
                     bc1, bc2 = st.columns(2)
                     with bc1:
-                        if st.button("✏️ Editar", key=f"eb_{vid}"):
+                        if st.button("✏️ Editar esta inspección", key=f"eb_{vid}", use_container_width=True):
                             st.session_state.editando_id = vid
                             st.rerun()
                     with bc2:
-                        if st.button("🗑️ Eliminar", key=f"del_{vid}"):
-                            db.eliminar_inspeccion(vid)
-                            st.success("Eliminada.")
-                            st.rerun()
+                        if st.button("🗑️ Eliminar", key=f"del_{vid}", use_container_width=True):
+                            if db.eliminar_inspeccion(vid):
+                                st.success("✅ Inspección eliminada correctamente.")
+                                st.rerun()
 
                 else:
-                    st.markdown("#### ✏️ Editando inspección")
+                    # ── MODO EDICIÓN ──
+                    st.markdown(f"#### ✏️ Editando inspección ID {vid}")
+                    st.caption("Los campos marcados con * son obligatorios")
+
                     prev_vals = {}
                     if not df_items_sel.empty:
                         for _, it in df_items_sel.iterrows():
@@ -952,56 +981,89 @@ def main():
                             elif "ELÉCTRICA" in sec:
                                 prev_vals[f"edit_{vid}_elec_{idx_i}"] = it["resultado"]
 
+                    # Datos del equipo
+                    st.markdown("<div class='seccion-titulo'>🏭 DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
                     ec1, ec2, ec3, ec4, ec5 = st.columns(5)
-                    with ec1: e_fecha  = st.date_input("Fecha",   value=row["fecha"],   key=f"ef_{vid}")
+                    with ec1:
+                        e_fecha  = st.date_input("📅 Fecha", value=row["fecha"], key=f"ef_{vid}")
                     with ec2:
                         maq_idx = MAQUINAS.index(row["maquina"]) if row["maquina"] in MAQUINAS else 0
-                        e_maq   = st.selectbox("Máquina", MAQUINAS, index=maq_idx, key=f"em_{vid}")
-                    with ec3: e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
-                    with ec4: e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
-                    with ec5: e_placa  = st.text_input("Placa",  value=str(row.get("placa", "") or ""), key=f"eplaca_{vid}")
+                        e_maq   = st.selectbox("⚙️ Máquina", MAQUINAS, index=maq_idx, key=f"em_{vid}")
+                    with ec3:
+                        e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
+                    with ec4:
+                        e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
+                    with ec5:
+                        e_placa  = st.text_input("Placa",  value=str(row.get("placa", "") or ""), key=f"eplaca_{vid}")
 
+                    # Ítems de inspección
+                    st.caption("Selecciona **C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
                     render_items_seccion("ANTES DE SU USO",                    ITEMS_ANTES_USO, f"edit_{vid}", "au",   prev_vals)
                     render_items_seccion("ELEMENTOS DE PROTECCIÓN PERSONAL",   ITEMS_EPP,       f"edit_{vid}", "epp",  prev_vals)
                     render_items_seccion("SEGURIDAD ELÉCTRICA",                ITEMS_ELECTRICA, f"edit_{vid}", "elec", prev_vals)
 
-                    with st.form(f"form_edit_{vid}"):
-                        ee1, ee2, ee3, ee4 = st.columns(4)
-                        with ee1: e_trab = st.text_input("Trabajador",       value=str(row.get("trabajador","")                or ""), key=f"etrab_{vid}")
-                        with ee2: e_rev  = st.text_input("Revisado por",     value=str(row.get("revisado_por","")              or ""), key=f"erev_{vid}")
-                        with ee3: e_cli  = st.text_input("Cliente/Proyecto", value=str(row.get("cliente_proyecto","")          or ""), key=f"ecli_{vid}")
-                        with ee4: e_mant = st.text_input("Resp. Mant.",      value=str(row.get("responsable_mantenimiento","") or ""), key=f"emant_{vid}")
+                    # Datos de control (OBLIGATORIOS)
+                    st.markdown("<div class='seccion-titulo'>📋 DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>", unsafe_allow_html=True)
+                    ee1, ee2, ee3, ee4 = st.columns(4)
+                    with ee1:
+                        e_trab = st.text_input("👷 Trabajador *",       value=str(row.get("trabajador","")                or ""), key=f"etrab_{vid}")
+                    with ee2:
+                        e_rev  = st.text_input("👤 Revisado por *",     value=str(row.get("revisado_por","")              or ""), key=f"erev_{vid}")
+                    with ee3:
+                        e_cli  = st.text_input("🏢 Cliente/Proyecto *", value=str(row.get("cliente_proyecto","")          or ""), key=f"ecli_{vid}")
+                    with ee4:
+                        e_mant = st.text_input("🔧 Resp. Mant. *",      value=str(row.get("responsable_mantenimiento","") or ""), key=f"emant_{vid}")
 
-                        estados_l  = [e.split(" ", 1)[1] for e in ESTADOS_INSPECCION]
-                        est_actual = str(row.get("estado") or "Aprobada")
-                        est_idx    = estados_l.index(est_actual) if est_actual in estados_l else 0
+                    estados_l  = [e.split(" ", 1)[1] for e in ESTADOS_INSPECCION]
+                    est_actual = str(row.get("estado") or "Aprobada")
+                    # Buscar coincidencia parcial para robustez
+                    est_idx = 0
+                    for idx_e, est_opt in enumerate(estados_l):
+                        if est_actual in est_opt or est_opt in est_actual:
+                            est_idx = idx_e
+                            break
 
-                        ef1, ef2 = st.columns([1, 3])
-                        with ef1: e_estado = st.selectbox("Estado", ESTADOS_INSPECCION, index=est_idx, key=f"eest_{vid}")
-                        with ef2: e_obs    = st.text_area("Observaciones", value=str(row.get("observaciones","") or ""),
-                                                           key=f"eobs_{vid}", height=80)
+                    ef1, ef2 = st.columns([1, 3])
+                    with ef1:
+                        e_estado = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, index=est_idx, key=f"eest_{vid}")
+                    with ef2:
+                        e_obs = st.text_area("💬 Observaciones", value=str(row.get("observaciones","") or ""),
+                                              key=f"eobs_{vid}", height=80)
 
-                        sg1, sg2 = st.columns(2)
-                        with sg1: guardar  = st.form_submit_button("💾 Guardar Cambios", type="primary")
-                        with sg2: cancelar = st.form_submit_button("❌ Cancelar")
+                    st.divider()
+                    sg1, sg2 = st.columns(2)
+                    with sg1:
+                        guardar_edit = st.button("💾 Guardar Cambios", type="primary",
+                                                  key=f"guardar_edit_{vid}", use_container_width=True)
+                    with sg2:
+                        cancelar_edit = st.button("❌ Cancelar Edición",
+                                                   key=f"cancelar_edit_{vid}", use_container_width=True)
 
-                    if guardar:
-                        items_edit = construir_items(f"edit_{vid}")
-                        datos_edit = {
-                            "fecha": e_fecha, "maquina": e_maq, "modelo": e_modelo,
-                            "marca": e_marca, "placa": e_placa,
-                            "trabajador": e_trab, "revisado_por": e_rev,
-                            "cliente_proyecto": e_cli, "responsable_mantenimiento": e_mant,
-                            "estado": e_estado.split(" ", 1)[1] if " " in e_estado else e_estado,
-                            "observaciones": e_obs,
-                        }
-                        if db.actualizar_inspeccion(vid, datos_edit, items_edit):
-                            st.success("✅ Inspección actualizada.")
-                            st.session_state.editando_id = None
-                            st.rerun()
-                    if cancelar:
+                    if guardar_edit:
+                        errores_edit = validar_datos_control(e_trab, e_rev, e_cli, e_mant)
+                        if errores_edit:
+                            st.error("❌ Por favor completa los siguientes campos obligatorios:")
+                            for err in errores_edit:
+                                st.markdown(f"- {err}")
+                        else:
+                            items_edit = construir_items(f"edit_{vid}")
+                            datos_edit = {
+                                "fecha": e_fecha, "maquina": e_maq, "modelo": e_modelo,
+                                "marca": e_marca, "placa": e_placa,
+                                "trabajador": e_trab.strip(), "revisado_por": e_rev.strip(),
+                                "cliente_proyecto": e_cli.strip(), "responsable_mantenimiento": e_mant.strip(),
+                                "estado": e_estado.split(" ", 1)[1] if " " in e_estado else e_estado,
+                                "observaciones": e_obs,
+                            }
+                            if db.actualizar_inspeccion(vid, datos_edit, items_edit):
+                                st.success("✅ Inspección actualizada correctamente.")
+                                st.session_state.editando_id = None
+                                st.rerun()
+
+                    if cancelar_edit:
                         st.session_state.editando_id = None
                         st.rerun()
+
         else:
             st.warning("No hay inspecciones con los filtros seleccionados.")
 
@@ -1090,9 +1152,12 @@ def main():
             g5, g6 = st.columns(2)
             with g5:
                 st.markdown("#### % Aprobación por Máquina")
-                resumen_apr = df_s.groupby("maquina").apply(lambda g: pd.Series({
-                    "pct_apro": round(g["estado"].str.contains("Aprobada", na=False).sum() / len(g) * 100, 1)
-                })).reset_index().sort_values("pct_apro")
+                resumen_apr = df_s.groupby("maquina", as_index=False).agg(
+                    aprobadas=("estado", lambda x: x.str.contains("Aprobada", na=False).sum()),
+                    total    =("estado", "count"),
+                )
+                resumen_apr["pct_apro"] = (resumen_apr["aprobadas"] / resumen_apr["total"] * 100).round(1)
+                resumen_apr = resumen_apr.sort_values("pct_apro")
                 fig5 = px.bar(resumen_apr, x="pct_apro", y="maquina", orientation="h",
                               color="pct_apro", color_continuous_scale="Greens",
                               text="pct_apro", range_x=[0,100])
@@ -1121,13 +1186,13 @@ def main():
             st.markdown("#### 🏆 Ranking de Inspectores")
             df_insp = df_s[
                 df_s["trabajador"].notna() & (df_s["trabajador"].str.strip() != "")
-            ].groupby("trabajador").agg(
+            ].groupby("trabajador", as_index=False).agg(
                 inspecciones=("trabajador","count"),
                 aprobadas   =("estado", lambda x: x.str.contains("Aprobada",      na=False).sum()),
                 con_obs     =("estado", lambda x: x.str.contains("Observaciones", na=False).sum()),
                 rechazadas  =("estado", lambda x: x.str.contains("Rechazada",     na=False).sum()),
                 total_nc    =("num_nc","sum"),
-            ).reset_index().sort_values("inspecciones", ascending=False).drop_duplicates(subset="trabajador")
+            ).sort_values("inspecciones", ascending=False)
             df_insp["% Aprobación"] = (df_insp["aprobadas"] / df_insp["inspecciones"] * 100).round(1).astype(str) + "%"
             df_insp["total_nc"]     = df_insp["total_nc"].astype(int)
             df_insp.columns = ["Inspector","Total","✅ Aprob.","⚠️ Obs.","❌ Rech.","🔴 NC Total","% Aprobación"]
