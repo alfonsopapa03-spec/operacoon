@@ -1,8 +1,6 @@
-streamlit
-psycopg2-binary
-pandas
-pillow
-plotly
-openpyxl
-pytz
-reportlab
+streamlit>=1.32.0
+psycopg2-binary>=2.9.9
+pandas>=2.0.0
+plotly>=5.18.0
+openpyxl>=3.1.0
+pytz>=2024.1
