@@ -3,153 +3,26 @@ import psycopg2
 from psycopg2 import pool as pg_pool
 from psycopg2 import OperationalError
 import pandas as pd
-from datetime import datetime, timedelta, date
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime
 import io
+import math
+import pytz
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import pytz
 
 # ==================== CONFIGURACIÓN ====================
 st.set_page_config(
-    page_title="Inspecciones Preoperacionales",
+    page_title="Sistema de Cubicaje",
     layout="wide",
-    page_icon="🔧",
-    initial_sidebar_state="collapsed"
+    page_icon="📦",
+    initial_sidebar_state="expanded"
 )
 
 # ==================== CREDENCIALES ====================
 SUPABASE_DB_URL = "postgresql://postgres.ogfenizdijcboekqhuhd:Conejito200$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
-
-# ==================== CATÁLOGO DE MÁQUINAS ====================
-MAQUINAS = [
-    "Bloquera",
-    "Caldera",
-    "Dobladora",
-    "Enderezadora",
-    "Enmalladora",
-    "Molino",
-    "Montacarga",
-    "Paneladora",
-    "Pantógrafo",
-    "Preexpansora",
-    "Soldador Manual",
-]
-
-# ==================== ÍTEMS DE INSPECCIÓN POR MÁQUINA ====================
-
-# EPP y Eléctrica son iguales para todas las máquinas
-ITEMS_EPP = [
-    "¿Cuenta con los elementos de protección personal? (protector de ojos, oídos, guantes y calzado)?",
-    "¿El trabajador está vestido apropiadamente? (Camisa manga larga, pantalón de dotación y calzado de seguridad)",
-    "¿Se evidencia el NO uso de joyas, relojes y ropa holgada?",
-    "¿Se tiene el cabello recogido si lo tiene largo?",
-]
-
-ITEMS_ELECTRICA = [
-    "¿Se ha verificado que el cable de alimentación esté en buen estado?",
-    "¿Se ha revisado que el enchufe se encuentre en buenas condiciones?",
-    "¿El interruptor de encendido funciona correctamente?",
-]
-
-# Preguntas genéricas (para máquinas sin formulario específico aún)
-ITEMS_ANTES_USO_GENERICO = [
-    "¿Tiene permiso el trabajador para utilizar la máquina?",
-    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
-    "¿Se ha verificado que la presión del aire se encuentre en 125 PSI?",
-    "¿Se ha inspeccionado que los desviadores contengan material adecuadamente?",
-    "¿Se ha inspeccionado que los electro-válvulas funcionen adecuadamente?",
-    "¿Se ha comprobado que los ganchos de ajuste funcionen correctamente?",
-    "¿El 'carrusel' de fricción del material funciona satisfactoriamente?",
-    "¿Se ha verificado que el tope se encuentre en óptimas condiciones?",
-    "¿Se ha inspeccionado que los botones y controles funcionen oportunamente?",
-    "¿Las paradas de emergencia (6 en total) funcionan correctamente?",
-    "¿Se ha verificado el estado de los cabezales (inferior/superior)?",
-    "¿El nivel de aceite de lubricación se encuentra en nivel adecuado?",
-    "¿El manómetro de aceite de sobrecarga funciona correctamente?",
-    "¿Se ha ajustado la altura del panel a la medida correspondiente?",
-    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de incendios, instalaciones, otros trabajadores, etc.)",
-    "¿La iluminación del área de trabajo es adecuada para operación de la máquina sin riesgos?",
-]
-
-ITEMS_ANTES_USO_BLOQUERA = ITEMS_ANTES_USO_GENERICO
-
-ITEMS_ANTES_USO_PANELADORA = [
-    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
-    "¿Tiene permiso el trabajador para utilizar la máquina?",
-    "¿Se ha verificado que la presión del aire se encuentre en 125 PSI?",
-    "¿Se ha revisado que los devanadores contengan material?",
-    "¿Se ha inspeccionado que las electroválvulas funcionan adecuadamente?",
-    "¿Se ha comprobado que los ganchos de agarre funcionen adecuadamente?",
-    "¿El \"carro\" de tracción del material funciona satisfactoriamente?",
-    "¿Se ha verificado que el tope se encuentre en óptimas condiciones?",
-    "¿Las paradas de emergencias (6 en total) funcionan correctamente?",
-    "¿Se ha inspeccionado que los botones y controles funcionen oportunamente?",
-    "¿Se ha verificado el estado de los cabezales (inferior/superior)?",
-    "¿El nivel de aceite de lubricación se encuentra en nivel correspondiente?",
-    "¿Igualmente, el nivel del líquido refrigerante se encuentra en nivel adecuado?",
-    "¿El manómetro de aire de soldadura funciona correctamente?",
-    "¿Se ha ajustado la altura del panel a medida correspondiente?",
-    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de tropezones, resbalones, otros trabajadores, etc.)",
-    "¿La iluminación del área de trabajo es adecuada para operación de la máquina sin riesgos?",
-]
-
-ITEMS_ANTES_USO_ENDEREZADORA = [
-    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
-    "¿Tiene permiso el trabajador para utilizar la máquina?",
-    "¿Existe suficiente material en los devanadores?",
-    "¿El encendido funciona correctamente?",
-    "¿La tensión de trabajo de la máquina están calibrado adecuadamente?",
-    "¿Las paradas de emergencias funcionan correctamente?",
-    "¿Se ha inspeccionado que los botones y controles funcionen oportunamente?",
-    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de tropezones, resbalones, otros trabajadores, etc.)",
-    "¿La iluminación del área de trabajo es adecuada para operación de la máquina sin riesgos?",
-]
-
-ITEMS_ANTES_USO_MOLINO = [
-    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
-    "¿Tiene permiso el trabajador para utilizar la máquina?",
-    "¿Existe suficiente material en los devanadores?",
-    "¿El encendido funciona correctamente?",
-    "¿La tensión de trabajo de la máquina están calibrado adecuadamente?",
-    "¿Las paradas de emergencias funcionan correctamente?",
-    "¿Se ha inspeccionado que los botones y controles funcionen oportunamente?",
-    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de tropezones, resbalones, otros trabajadores, etc.)",
-    "¿La iluminación del área de trabajo es adecuada para operación de la máquina sin riesgos?",
-]
-
-ITEMS_ANTES_USO_PANTOGRAFO = [
-    "¿Tiene permiso el trabajador para utilizar la máquina?",
-    "¿Ha sido capacitado el trabajador para utilizar la máquina?",
-    "¿Se cuentan con las herramientas necesarias para labores de ajuste de la máquina?",
-    "¿Se han tomado las debidas medidas de seguridad para evitar atrapamiento en las partes móviles de la máquina con cualquier parte del cuerpo?",
-    "¿Se ha inspeccionado el lugar de trabajo? (material combustible, riesgo de tropezones, resbalones, otros trabajadores, etc.)",
-    "¿Los alambres están debidamente tensionados?",
-    "¿La banda transportadora del bloque funciona de manera adecuada?",
-    "¿Los ventiladores de enfriamiento están funcionando?",
-    "¿Las luces indicadoras se encuentran en buen estado y funcionan adecuadamente?",
-    "¿Las guardas de protección se encuentran en la posición correspondiente?",
-    "¿Los botones de parada de emergencia están funcionando?",
-    "¿La iluminación del lugar de trabajo es adecuada y permite realizar el trabajo de manera segura?",
-]
-
-# Mapa de preguntas por máquina
-ITEMS_POR_MAQUINA = {
-    "Bloquera":       ITEMS_ANTES_USO_BLOQUERA,
-    "Caldera":        ITEMS_ANTES_USO_GENERICO,
-    "Dobladora":      ITEMS_ANTES_USO_GENERICO,
-    "Enderezadora":   ITEMS_ANTES_USO_ENDEREZADORA,
-    "Enmalladora":    ITEMS_ANTES_USO_GENERICO,
-    "Molino":         ITEMS_ANTES_USO_MOLINO,
-    "Montacarga":     ITEMS_ANTES_USO_GENERICO,
-    "Paneladora":     ITEMS_ANTES_USO_PANELADORA,
-    "Pantógrafo":     ITEMS_ANTES_USO_PANTOGRAFO,
-    "Preexpansora":   ITEMS_ANTES_USO_GENERICO,
-    "Soldador Manual":ITEMS_ANTES_USO_GENERICO,
-}
-
-OPCIONES_INSPECCION = ["C", "NC", "N/A"]
-ESTADOS_INSPECCION  = ["✅ Aprobada", "⚠️ Con Observaciones", "❌ Rechazada"]
 
 # ==================== CSS ====================
 st.markdown("""
@@ -165,57 +38,33 @@ st.markdown("""
         font-family: 'Barlow Condensed', sans-serif;
         font-size: 2rem; font-weight: 700; color: white; margin: 0; letter-spacing: 1px;
     }
-    .main-header p { color: #a0c4d8; margin: 0; font-size: 0.9rem; }
+    .main-header p { color: #a0c4d8; margin: 0.3rem 0 0 0; font-size: 0.9rem; }
 
     .seccion-titulo {
         background: #203a43; color: white; padding: 0.4rem 1rem;
         border-radius: 6px; font-weight: 700; font-size: 0.95rem;
         margin: 1rem 0 0.5rem 0; letter-spacing: 0.5px;
     }
+    .metric-card {
+        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+        border-radius: 10px; padding: 18px; color: white;
+        text-align: center; border: 1px solid rgba(255,255,255,0.1);
+    }
+    .metric-value { font-size: 1.9rem; font-weight: 700; color: #00d4ff;
+                    font-family: 'Barlow Condensed', sans-serif; }
+    .metric-label { font-size: 0.82rem; opacity: 0.75; margin-top: 4px; }
 
-    /* ── CARD DE DÍA (layout móvil) ── */
-    .dia-card {
-        background: #f0f4f8;
-        border-left: 4px solid #2c5364;
-        border-radius: 8px;
-        padding: 0.8rem 1rem 0.4rem 1rem;
-        margin-bottom: 1rem;
-    }
-    .dia-card-title {
-        font-family: 'Barlow Condensed', sans-serif;
-        font-size: 1.05rem; font-weight: 700;
-        color: #0f2027; margin-bottom: 0.5rem;
-        display: flex; align-items: center; gap: 0.4rem;
-    }
-    .item-row {
-        display: flex; align-items: flex-start;
-        gap: 0.5rem; margin-bottom: 0.3rem;
-    }
-    .item-num {
-        font-weight: 700; color: #2c5364;
-        min-width: 22px; font-size: 0.82rem; padding-top: 2px;
-    }
-    .item-label { font-size: 0.84rem; color: #333; line-height: 1.35; }
-
-    .badge-c   { background:#2ecc71; color:white; border-radius:4px; padding:2px 8px; font-weight:700; font-size:0.8rem; }
-    .badge-nc  { background:#e74c3c; color:white; border-radius:4px; padding:2px 8px; font-weight:700; font-size:0.8rem; }
-    .badge-na  { background:#95a5a6; color:white; border-radius:4px; padding:2px 8px; font-weight:700; font-size:0.8rem; }
-
-    div[data-testid="stTabs"] button {
-        font-family:'Barlow Condensed',sans-serif;
-        font-weight:600; font-size:1rem; letter-spacing:0.5px;
-    }
     .kpi-box {
-        background:white; border-radius:10px; padding:1rem 1.2rem;
-        border-left:5px solid #2c5364; box-shadow:0 2px 8px rgba(0,0,0,0.07);
-        margin-bottom:0.5rem;
+        background: white; border-radius: 10px; padding: 1rem 1.2rem;
+        border-left: 5px solid #2c5364; box-shadow: 0 2px 8px rgba(0,0,0,0.07);
     }
-    .campo-obligatorio { color:#e74c3c; font-weight:bold; }
-
-    /* Selectbox más táctil en móvil */
-    .stSelectbox div[data-baseweb="select"] > div {
-        min-height: 42px !important;
-        font-size: 1rem !important;
+    .badge-c   { background:#2ecc71; color:white; border-radius:4px; padding:2px 8px;
+                 font-weight:700; font-size:0.8rem; }
+    .badge-nc  { background:#e74c3c; color:white; border-radius:4px; padding:2px 8px;
+                 font-weight:700; font-size:0.8rem; }
+    div[data-testid="stTabs"] button {
+        font-family: 'Barlow Condensed', sans-serif;
+        font-weight: 600; font-size: 1rem; letter-spacing: 0.5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -225,17 +74,17 @@ st.markdown("""
 @st.cache_resource
 def get_pool():
     try:
-        connection_pool = pg_pool.SimpleConnectionPool(
+        return pg_pool.SimpleConnectionPool(
             minconn=1, maxconn=5,
             dsn=SUPABASE_DB_URL,
             sslmode="require",
             connect_timeout=15,
             options="-c statement_timeout=30000"
         )
-        return connection_pool
     except OperationalError as e:
         st.error(f"❌ Error crítico de conexión: {e}")
         st.stop()
+
 
 class DB:
     def __init__(self):
@@ -249,9 +98,11 @@ class DB:
             return c
         except Exception:
             try:
-                return psycopg2.connect(dsn=SUPABASE_DB_URL, sslmode="require", connect_timeout=15)
+                return psycopg2.connect(
+                    dsn=SUPABASE_DB_URL, sslmode="require", connect_timeout=15
+                )
             except OperationalError as e:
-                st.error(f"❌ No se pudo conectar a la BD: {e}")
+                st.error(f"❌ No se pudo conectar: {e}")
                 st.stop()
 
     def release(self, c):
@@ -262,893 +113,722 @@ class DB:
             pass
 
     def init(self):
+        """Crea las tablas de cubicaje si no existen."""
         c = None
         try:
             c = self.conn()
             cur = c.cursor()
+            # Tabla principal de envíos / lotes de cubicaje
             cur.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'inspecciones_preop'
-            """)
-            cols_existentes = {row[0] for row in cur.fetchall()}
-
-            if not cols_existentes:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS inspecciones_preop (
-                        id SERIAL PRIMARY KEY,
-                        fecha_registro TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
-                        fecha_ini DATE NOT NULL,
-                        fecha_fin DATE NOT NULL,
-                        maquina TEXT NOT NULL,
-                        modelo TEXT, marca TEXT, placa TEXT,
-                        trabajador TEXT NOT NULL,
-                        revisado_por TEXT NOT NULL,
-                        cliente_proyecto TEXT NOT NULL,
-                        responsable_mantenimiento TEXT NOT NULL,
-                        estado TEXT DEFAULT 'Aprobada',
-                        observaciones TEXT
-                    )
-                """)
-            else:
-                if "fecha_ini" not in cols_existentes:
-                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_ini DATE")
-                    cur.execute("UPDATE inspecciones_preop SET fecha_ini = CURRENT_DATE WHERE fecha_ini IS NULL")
-                if "fecha_fin" not in cols_existentes:
-                    cur.execute("ALTER TABLE inspecciones_preop ADD COLUMN fecha_fin DATE")
-                    cur.execute("UPDATE inspecciones_preop SET fecha_fin = CURRENT_DATE WHERE fecha_fin IS NULL")
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS inspecciones_preop_items (
-                    id SERIAL PRIMARY KEY,
-                    inspeccion_id INTEGER REFERENCES inspecciones_preop(id) ON DELETE CASCADE,
-                    seccion TEXT NOT NULL,
-                    item_numero INTEGER NOT NULL,
-                    descripcion TEXT NOT NULL,
-                    dia TEXT NOT NULL DEFAULT 'General',
-                    resultado TEXT DEFAULT 'C'
+                CREATE TABLE IF NOT EXISTS cubicaje_lotes (
+                    id               SERIAL PRIMARY KEY,
+                    fecha_registro   TIMESTAMP DEFAULT (now() AT TIME ZONE 'America/Bogota'),
+                    nombre_lote      TEXT NOT NULL,
+                    responsable      TEXT NOT NULL,
+                    cliente_proyecto TEXT,
+                    cont_tipo        TEXT,
+                    cont_largo       NUMERIC NOT NULL,
+                    cont_ancho       NUMERIC NOT NULL,
+                    cont_alto        NUMERIC NOT NULL,
+                    factor_vol       INTEGER DEFAULT 5000,
+                    eficiencia_pct   NUMERIC,
+                    contenedores_nec INTEGER,
+                    vol_total_m3     NUMERIC,
+                    peso_total_kg    NUMERIC,
+                    observaciones    TEXT
                 )
             """)
+            # Tabla de productos por lote
             cur.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'inspecciones_preop_items'
+                CREATE TABLE IF NOT EXISTS cubicaje_productos (
+                    id          SERIAL PRIMARY KEY,
+                    lote_id     INTEGER REFERENCES cubicaje_lotes(id) ON DELETE CASCADE,
+                    nombre      TEXT NOT NULL,
+                    largo       NUMERIC NOT NULL,
+                    ancho       NUMERIC NOT NULL,
+                    alto        NUMERIC NOT NULL,
+                    peso_kg     NUMERIC DEFAULT 0,
+                    cantidad    INTEGER DEFAULT 1,
+                    vol_unit_m3 NUMERIC,
+                    vol_total_m3 NUMERIC,
+                    peso_vol_kg  NUMERIC,
+                    peso_cobrable NUMERIC
+                )
             """)
-            item_cols = {row[0] for row in cur.fetchall()}
-            if "dia" not in item_cols:
-                cur.execute("ALTER TABLE inspecciones_preop_items ADD COLUMN dia TEXT NOT NULL DEFAULT 'General'")
-
             c.commit()
             cur.close()
-        except OperationalError as e:
-            st.error(f"Error inicializando DB: {e}")
+        except Exception as e:
+            st.error(f"Error inicializando tablas: {e}")
         finally:
             self.release(c)
 
-    def guardar_inspeccion(self, datos, items):
+    # ── CRUD LOTES ──────────────────────────────────────
+    def guardar_lote(self, datos: dict, productos: list) -> bool:
         c = None
         try:
             c = self.conn()
             cur = c.cursor()
             cur.execute("""
-                INSERT INTO inspecciones_preop
-                (fecha_ini,fecha_fin,maquina,modelo,marca,placa,trabajador,revisado_por,
-                 cliente_proyecto,responsable_mantenimiento,estado,observaciones)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (datos["fecha_ini"],datos["fecha_fin"],datos["maquina"],datos["modelo"],
-                  datos["marca"],datos["placa"],datos["trabajador"],datos["revisado_por"],
-                  datos["cliente_proyecto"],datos["responsable_mantenimiento"],
-                  datos["estado"],datos["observaciones"]))
-            inspeccion_id = cur.fetchone()[0]
-            for item in items:
+                INSERT INTO cubicaje_lotes
+                (nombre_lote, responsable, cliente_proyecto, cont_tipo,
+                 cont_largo, cont_ancho, cont_alto, factor_vol,
+                 eficiencia_pct, contenedores_nec, vol_total_m3,
+                 peso_total_kg, observaciones)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+            """, (
+                datos["nombre_lote"], datos["responsable"], datos["cliente_proyecto"],
+                datos["cont_tipo"], datos["cont_largo"], datos["cont_ancho"],
+                datos["cont_alto"], datos["factor_vol"], datos["eficiencia_pct"],
+                datos["contenedores_nec"], datos["vol_total_m3"],
+                datos["peso_total_kg"], datos["observaciones"]
+            ))
+            lote_id = cur.fetchone()[0]
+            for p in productos:
                 cur.execute("""
-                    INSERT INTO inspecciones_preop_items
-                    (inspeccion_id,seccion,item_numero,descripcion,dia,resultado)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                """, (inspeccion_id,item["seccion"],item["item_numero"],
-                      item["descripcion"],item["dia"],item["resultado"]))
-            c.commit(); cur.close()
+                    INSERT INTO cubicaje_productos
+                    (lote_id, nombre, largo, ancho, alto, peso_kg, cantidad,
+                     vol_unit_m3, vol_total_m3, peso_vol_kg, peso_cobrable)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    lote_id, p["nombre"], p["largo"], p["ancho"], p["alto"],
+                    p["peso_kg"], p["cantidad"], p["vol_unit_m3"],
+                    p["vol_total_m3"], p["peso_vol_kg"], p["peso_cobrable"]
+                ))
+            c.commit()
+            cur.close()
             return True
-        except OperationalError as e:
-            st.error(f"Error guardando: {e}"); return False
-        finally:
-            self.release(c)
-
-    def actualizar_inspeccion(self, inspeccion_id, datos, items):
-        c = None
-        try:
-            c = self.conn()
-            cur = c.cursor()
-            cur.execute("""
-                UPDATE inspecciones_preop SET
-                fecha_ini=%s,fecha_fin=%s,maquina=%s,modelo=%s,marca=%s,placa=%s,
-                trabajador=%s,revisado_por=%s,cliente_proyecto=%s,
-                responsable_mantenimiento=%s,estado=%s,observaciones=%s WHERE id=%s
-            """, (datos["fecha_ini"],datos["fecha_fin"],datos["maquina"],datos["modelo"],
-                  datos["marca"],datos["placa"],datos["trabajador"],datos["revisado_por"],
-                  datos["cliente_proyecto"],datos["responsable_mantenimiento"],
-                  datos["estado"],datos["observaciones"],inspeccion_id))
-            cur.execute("DELETE FROM inspecciones_preop_items WHERE inspeccion_id=%s",(inspeccion_id,))
-            for item in items:
-                cur.execute("""
-                    INSERT INTO inspecciones_preop_items
-                    (inspeccion_id,seccion,item_numero,descripcion,dia,resultado)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                """, (inspeccion_id,item["seccion"],item["item_numero"],
-                      item["descripcion"],item["dia"],item["resultado"]))
-            c.commit(); cur.close()
-            return True
-        except OperationalError as e:
-            st.error(f"Error actualizando: {e}"); return False
-        finally:
-            self.release(c)
-
-    def eliminar_inspeccion(self, inspeccion_id):
-        c = None
-        try:
-            c = self.conn()
-            cur = c.cursor()
-            cur.execute("DELETE FROM inspecciones_preop WHERE id=%s",(inspeccion_id,))
-            c.commit(); cur.close()
-            return True
-        except OperationalError as e:
-            st.error(f"Error eliminando: {e}"); return False
-        finally:
-            self.release(c)
-
-    def obtener_inspecciones(self, fecha_ini=None, fecha_fin=None,
-                              maquina=None, estado=None, trabajador=None):
-        c = None
-        try:
-            c = self.conn()
-            q = """
-                SELECT id,fecha_ini,fecha_fin,maquina,modelo,marca,placa,
-                       trabajador,revisado_por,cliente_proyecto,
-                       responsable_mantenimiento,estado,observaciones,fecha_registro
-                FROM inspecciones_preop WHERE 1=1
-            """
-            params = []
-            if fecha_ini:  q += " AND fecha_ini >= %s"; params.append(fecha_ini)
-            if fecha_fin:  q += " AND fecha_fin <= %s"; params.append(fecha_fin)
-            if maquina and maquina != "Todas":   q += " AND maquina = %s"; params.append(maquina)
-            if estado  and estado  != "Todos":   q += " AND estado ILIKE %s"; params.append(f"%{estado}%")
-            if trabajador: q += " AND trabajador ILIKE %s"; params.append(f"%{trabajador}%")
-            q += " ORDER BY fecha_ini DESC, id DESC"
-            return pd.read_sql(q, c, params=params)
         except Exception as e:
-            st.error(f"Error consultando: {e}"); return pd.DataFrame()
-        finally:
-            self.release(c)
-
-    def obtener_items_inspeccion(self, inspeccion_id):
-        c = None
-        try:
-            c = self.conn()
-            return pd.read_sql("""
-                SELECT seccion,item_numero,descripcion,
-                       COALESCE(dia,'General') AS dia, resultado
-                FROM inspecciones_preop_items
-                WHERE inspeccion_id=%s
-                ORDER BY seccion,item_numero,dia
-            """, c, params=[inspeccion_id])
-        except Exception as e:
-            st.error(f"Error obteniendo ítems: {e}"); return pd.DataFrame()
-        finally:
-            self.release(c)
-
-    def obtener_todos_los_items(self, ids):
-        if not ids: return pd.DataFrame()
-        c = None
-        try:
-            c = self.conn()
-            return pd.read_sql("""
-                SELECT inspeccion_id,seccion,item_numero,descripcion,
-                       COALESCE(dia,'General') AS dia, resultado
-                FROM inspecciones_preop_items
-                WHERE inspeccion_id = ANY(%s)
-                ORDER BY inspeccion_id,seccion,item_numero,dia
-            """, c, params=[ids])
-        except Exception as e:
-            st.error(f"Error: {e}"); return pd.DataFrame()
-        finally:
-            self.release(c)
-
-    def stats_dashboard(self, fecha_ini, fecha_fin):
-        c = None
-        try:
-            c = self.conn()
-            return pd.read_sql("""
-                SELECT insp.id, insp.fecha_ini AS fecha, insp.maquina,
-                       insp.trabajador, insp.estado,
-                       COALESCE(stats.num_nc,0) AS num_nc,
-                       COALESCE(stats.num_c,0)  AS num_c,
-                       COALESCE(stats.total_items,0) AS total_items
-                FROM inspecciones_preop insp
-                LEFT JOIN (
-                    SELECT inspeccion_id,
-                           COUNT(*) FILTER (WHERE resultado='NC') AS num_nc,
-                           COUNT(*) FILTER (WHERE resultado='C')  AS num_c,
-                           COUNT(*) AS total_items
-                    FROM inspecciones_preop_items GROUP BY inspeccion_id
-                ) stats ON stats.inspeccion_id = insp.id
-                WHERE insp.fecha_ini >= %s AND insp.fecha_ini <= %s
-                ORDER BY insp.fecha_ini
-            """, c, params=[fecha_ini, fecha_fin])
-        except Exception as e:
-            st.error(f"Error en stats: {e}"); return pd.DataFrame()
-        finally:
-            self.release(c)
-
-    def verificar_inspeccion_existente(self, fecha_inicio, maquina):
-        c = None
-        try:
-            c = self.conn()
-            cur = c.cursor()
-            cur.execute(
-                "SELECT COUNT(*) FROM inspecciones_preop WHERE fecha_ini=%s AND maquina=%s",
-                (fecha_inicio, maquina)
-            )
-            count = cur.fetchone()[0]; cur.close()
-            return count > 0
-        except Exception:
+            st.error(f"Error guardando lote: {e}")
             return False
         finally:
             self.release(c)
 
+    def eliminar_lote(self, lote_id: int) -> bool:
+        c = None
+        try:
+            c = self.conn()
+            cur = c.cursor()
+            cur.execute("DELETE FROM cubicaje_lotes WHERE id=%s", (lote_id,))
+            c.commit()
+            cur.close()
+            return True
+        except Exception as e:
+            st.error(f"Error eliminando: {e}")
+            return False
+        finally:
+            self.release(c)
 
-# ==================== HELPERS ====================
+    def obtener_lotes(self, fecha_ini=None, fecha_fin=None,
+                      responsable=None, cliente=None) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            q = """
+                SELECT id, fecha_registro, nombre_lote, responsable,
+                       cliente_proyecto, cont_tipo, cont_largo, cont_ancho,
+                       cont_alto, factor_vol, eficiencia_pct,
+                       contenedores_nec, vol_total_m3, peso_total_kg, observaciones
+                FROM cubicaje_lotes WHERE 1=1
+            """
+            params = []
+            if fecha_ini:
+                q += " AND fecha_registro::date >= %s"; params.append(fecha_ini)
+            if fecha_fin:
+                q += " AND fecha_registro::date <= %s"; params.append(fecha_fin)
+            if responsable:
+                q += " AND responsable ILIKE %s"; params.append(f"%{responsable}%")
+            if cliente:
+                q += " AND cliente_proyecto ILIKE %s"; params.append(f"%{cliente}%")
+            q += " ORDER BY fecha_registro DESC"
+            return pd.read_sql(q, c, params=params)
+        except Exception as e:
+            st.error(f"Error consultando lotes: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
 
-def get_items_antes_uso(maquina: str) -> list:
-    """Retorna las preguntas de 'Antes de su uso' según la máquina."""
-    return ITEMS_POR_MAQUINA.get(maquina, ITEMS_ANTES_USO_GENERICO)
+    def obtener_productos_lote(self, lote_id: int) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT nombre, largo, ancho, alto, peso_kg, cantidad,
+                       vol_unit_m3, vol_total_m3, peso_vol_kg, peso_cobrable
+                FROM cubicaje_productos WHERE lote_id=%s
+                ORDER BY id
+            """, c, params=[lote_id])
+        except Exception as e:
+            st.error(f"Error obteniendo productos: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
+
+    def obtener_todos_los_productos(self, ids: list) -> pd.DataFrame:
+        if not ids:
+            return pd.DataFrame()
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT lote_id, nombre, largo, ancho, alto, peso_kg,
+                       cantidad, vol_unit_m3, vol_total_m3, peso_vol_kg, peso_cobrable
+                FROM cubicaje_productos WHERE lote_id = ANY(%s)
+                ORDER BY lote_id, id
+            """, c, params=[ids])
+        except Exception as e:
+            st.error(f"Error: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
+
+    def stats_dashboard(self, fecha_ini, fecha_fin) -> pd.DataFrame:
+        c = None
+        try:
+            c = self.conn()
+            return pd.read_sql("""
+                SELECT l.id, l.fecha_registro::date AS fecha,
+                       l.nombre_lote, l.responsable, l.cliente_proyecto,
+                       l.cont_tipo, l.eficiencia_pct, l.contenedores_nec,
+                       l.vol_total_m3, l.peso_total_kg,
+                       COUNT(p.id) AS num_productos,
+                       COALESCE(SUM(p.cantidad),0) AS total_unidades
+                FROM cubicaje_lotes l
+                LEFT JOIN cubicaje_productos p ON p.lote_id = l.id
+                WHERE l.fecha_registro::date >= %s
+                  AND l.fecha_registro::date <= %s
+                GROUP BY l.id
+                ORDER BY l.fecha_registro DESC
+            """, c, params=[fecha_ini, fecha_fin])
+        except Exception as e:
+            st.error(f"Error stats: {e}")
+            return pd.DataFrame()
+        finally:
+            self.release(c)
 
 
-def construir_items_semanal(prefix: str, dias_activos: list, maquina: str) -> list:
-    items_antes_uso = get_items_antes_uso(maquina)
-    items = []
-    secciones = [
-        ("ANTES DE SU USO",                  items_antes_uso, "au"),
-        ("ELEMENTOS DE PROTECCIÓN PERSONAL",  ITEMS_EPP,       "epp"),
-        ("SEGURIDAD ELÉCTRICA",               ITEMS_ELECTRICA, "elec"),
-    ]
-    for sec_nombre, sec_items, sec_key in secciones:
-        for i, desc in enumerate(sec_items):
-            for dia in dias_activos:
-                key = f"{prefix}_{sec_key}_{i}_{dia}"
-                resultado = st.session_state.get(key, "C")
-                items.append({
-                    "seccion":     sec_nombre,
-                    "item_numero": i + 1,
-                    "descripcion": desc,
-                    "dia":         dia,
-                    "resultado":   resultado,
-                })
-    return items
+# ==================== CÁLCULOS ====================
+def calcular_volumen_m3(largo, ancho, alto):
+    return (largo * ancho * alto) / 1_000_000
 
+def calcular_peso_volumetrico(largo, ancho, alto, factor=5000):
+    return (largo * ancho * alto) / factor
 
-def badge_resultado(val):
-    if val == "C":  return "🟢 C"
-    if val == "NC": return "🔴 NC"
-    return "⚪ N/A"
+def calcular_cubicaje(df: pd.DataFrame, contenedor: dict) -> dict:
+    vol_cont = contenedor["largo"] * contenedor["ancho"] * contenedor["alto"]
+    vol_total = (df["largo"] * df["ancho"] * df["alto"] * df["cantidad"]).sum()
+    eficiencia = min((vol_total / vol_cont) * 100, 100) if vol_cont > 0 else 0
+    contenedores_nec = math.ceil(vol_total / vol_cont) if vol_cont > 0 else 0
+    return {
+        "vol_contenedor_m3":    vol_cont / 1_000_000,
+        "vol_total_m3":         vol_total / 1_000_000,
+        "eficiencia_pct":       round(eficiencia, 2),
+        "contenedores_nec":     contenedores_nec,
+        "vol_disponible_m3":    max(0, (vol_cont - vol_total) / 1_000_000),
+    }
 
-
-def render_seccion_por_dia(seccion_label: str, items_lista: list, prefix: str,
-                            sec_key: str, dias_activos: list, valores_previos: dict = None):
-    """
-    Renderiza cada día como una tarjeta vertical — funciona bien en móvil y escritorio.
-    Estructura:
-        📅 Lun 11/05
-          1. ¿Pregunta...?   [C ▼]
-          2. ¿Pregunta...?   [C ▼]
-        📅 Mar 12/05
-          ...
-    """
-    st.markdown(f"<div class='seccion-titulo'>📋 {seccion_label}</div>", unsafe_allow_html=True)
-    st.caption("**C** = Cumple · **NC** = No Cumple · **N/A** = No Aplica")
-
-    if not dias_activos:
-        st.warning("Selecciona al menos un día activo.")
-        return
-
-    for dia in dias_activos:
-        with st.container():
-            st.markdown(f"<div class='dia-card-title'>📅 {dia}</div>", unsafe_allow_html=True)
-            for i, desc in enumerate(items_lista):
-                key = f"{prefix}_{sec_key}_{i}_{dia}"
-                prev = "C"
-                if valores_previos:
-                    prev = valores_previos.get(key, "C")
-                col_desc, col_sel = st.columns([5, 1])
-                with col_desc:
-                    st.markdown(
-                        f"<div class='item-label'><span class='item-num'>{i+1}.</span> {desc}</div>",
-                        unsafe_allow_html=True
-                    )
-                with col_sel:
-                    st.selectbox(
-                        "R", OPCIONES_INSPECCION,
-                        index=OPCIONES_INSPECCION.index(prev) if prev in OPCIONES_INSPECCION else 0,
-                        key=key,
-                        label_visibility="collapsed"
-                    )
-            st.divider()
-
-
-def validar_datos_control(trabajador, revisado_por, cliente_proyecto, resp_mantenimiento):
-    errores = []
-    if not trabajador or not trabajador.strip():
-        errores.append("👷 **Trabajador** es obligatorio.")
-    if not revisado_por or not revisado_por.strip():
-        errores.append("👤 **Revisado por** es obligatorio.")
-    if not cliente_proyecto or not cliente_proyecto.strip():
-        errores.append("🏢 **Cliente / Proyecto** es obligatorio.")
-    if not resp_mantenimiento or not resp_mantenimiento.strip():
-        errores.append("🔧 **Responsable de Mantenimiento** es obligatorio.")
-    return errores
+def enriquecer_df(df: pd.DataFrame, factor: int) -> pd.DataFrame:
+    df = df.copy()
+    for col in ["largo", "ancho", "alto", "peso_kg", "cantidad"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["cantidad"] = df["cantidad"].fillna(1).astype(int)
+    df = df.dropna(subset=["largo", "ancho", "alto"])
+    df["vol_unit_m3"]        = df.apply(lambda r: calcular_volumen_m3(r.largo, r.ancho, r.alto), axis=1)
+    df["vol_total_m3"]       = df["vol_unit_m3"] * df["cantidad"]
+    df["peso_vol_kg"]        = df.apply(lambda r: calcular_peso_volumetrico(r.largo, r.ancho, r.alto, factor), axis=1)
+    df["peso_cobrable"]      = df.apply(lambda r: max(r.peso_kg, r.peso_vol_kg) if r.peso_kg > 0 else r.peso_vol_kg, axis=1)
+    df["peso_cobrable_total"]= df["peso_cobrable"] * df["cantidad"]
+    return df
 
 
 # ==================== EXCEL ====================
-def generar_excel(df_inspecciones: pd.DataFrame, db: "DB", titulo: str = "Inspecciones Preoperacionales") -> bytes:
+def generar_excel(df_lotes: pd.DataFrame, db: DB) -> bytes:
     wb = Workbook()
-
-    ft_titulo = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    ft_header = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
-    ft_normal = Font(name="Calibri", size=9)
-    ft_total  = Font(name="Calibri", bold=True, size=10)
-    ft_nc     = Font(name="Calibri", size=9, color="C0392B", bold=True)
-    ft_apro   = Font(name="Calibri", size=9, color="1E8449")
-
-    fill_titulo  = PatternFill("solid", start_color="0F2027")
-    fill_header  = PatternFill("solid", start_color="203A43")
-    fill_alt     = PatternFill("solid", start_color="EBF5FB")
-    fill_total   = PatternFill("solid", start_color="D5DBDB")
-    fill_nc_row  = PatternFill("solid", start_color="FADBD8")
-    fill_obs_row = PatternFill("solid", start_color="FDEBD0")
-
-    borde  = Border(left=Side(style="thin"), right=Side(style="thin"),
-                    top=Side(style="thin"),  bottom=Side(style="thin"))
-    centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    izq    = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    ft_tit  = Font(name="Calibri", bold=True, size=13, color="FFFFFF")
+    ft_hdr  = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    ft_norm = Font(name="Calibri", size=9)
+    ft_num  = Font(name="Calibri", size=9, color="1A5276", bold=True)
+    fill_tit = PatternFill("solid", start_color="0F2027")
+    fill_hdr = PatternFill("solid", start_color="203A43")
+    fill_alt = PatternFill("solid", start_color="EBF5FB")
+    borde   = Border(left=Side(style="thin"), right=Side(style="thin"),
+                     top=Side(style="thin"),  bottom=Side(style="thin"))
+    centro  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    izq     = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
     now_col = datetime.now(pytz.timezone("America/Bogota"))
+    ids_list = df_lotes["id"].astype(int).tolist()
+    df_all_prod = db.obtener_todos_los_productos(ids_list)
+    prod_por_lote = {}
+    if not df_all_prod.empty:
+        for lid, grp in df_all_prod.groupby("lote_id"):
+            prod_por_lote[int(lid)] = grp
 
-    ids_list = df_inspecciones["id"].astype(int).tolist()
-    df_all_items = db.obtener_todos_los_items(ids_list)
-    items_por_id = {}
-    if not df_all_items.empty:
-        for insp_id, grp in df_all_items.groupby("inspeccion_id"):
-            items_por_id[int(insp_id)] = grp
-
+    # ── Hoja 1: Lotes ──
     ws = wb.active
-    ws.title = "Inspecciones"
-    total_cols = 15
-
-    ws.merge_cells(f"A1:{get_column_letter(total_cols)}1")
-    ws["A1"] = f"🔧 {titulo}   |   Generado: {now_col.strftime('%d/%m/%Y %H:%M')} (COL)   |   Total: {len(df_inspecciones)} inspecciones"
-    ws["A1"].font = ft_titulo; ws["A1"].fill = fill_titulo; ws["A1"].alignment = centro
-    ws.row_dimensions[1].height = 30
-
-    columnas = [
-        ("id","ID",6),("fecha_ini","F. INICIO",12),("fecha_fin","F. FIN",12),
-        ("maquina","MÁQUINA",20),("modelo","MODELO",14),("marca","MARCA",14),
-        ("placa","PLACA",12),("trabajador","TRABAJADOR",24),("revisado_por","REVISADO POR",24),
-        ("cliente_proyecto","CLIENTE/PROY.",20),("responsable_mantenimiento","RESP. MANT.",24),
-        ("estado","ESTADO",18),("num_nc","# NC",7),("num_c","# C",7),("observaciones","OBSERVACIONES",32),
+    ws.title = "Lotes"
+    cols1 = [
+        ("id","ID",6),("fecha_registro","FECHA",18),("nombre_lote","NOMBRE LOTE",28),
+        ("responsable","RESPONSABLE",24),("cliente_proyecto","CLIENTE/PROY.",22),
+        ("cont_tipo","CONTENEDOR",20),("eficiencia_pct","% EFIC.",10),
+        ("contenedores_nec","# CONT.",9),("vol_total_m3","VOL TOTAL m³",14),
+        ("peso_total_kg","PESO TOTAL kg",14),("observaciones","OBSERVACIONES",35),
     ]
+    ws.merge_cells(f"A1:{get_column_letter(len(cols1))}1")
+    ws["A1"] = f"📦 CUBICAJE — Generado: {now_col.strftime('%d/%m/%Y %H:%M')} | Total lotes: {len(df_lotes)}"
+    ws["A1"].font = ft_tit; ws["A1"].fill = fill_tit; ws["A1"].alignment = centro
+    ws.row_dimensions[1].height = 28
+    for ci, (key, nombre, ancho) in enumerate(cols1, 1):
+        c = ws.cell(2, ci, nombre)
+        c.font = ft_hdr; c.fill = fill_hdr; c.alignment = centro; c.border = borde
+        ws.column_dimensions[get_column_letter(ci)].width = ancho
+    ws.row_dimensions[2].height = 26
+    for ri, (_, row) in enumerate(df_lotes.iterrows(), 3):
+        fill_f = fill_alt if ri % 2 == 0 else None
+        for ci, (key, _, _) in enumerate(cols1, 1):
+            val = row.get(key, "")
+            cell = ws.cell(ri, ci, str(val) if val != "" else "")
+            cell.border = borde
+            cell.alignment = centro if key in ("id","eficiencia_pct","contenedores_nec","vol_total_m3","peso_total_kg") else izq
+            cell.font = ft_num if key == "eficiencia_pct" else ft_norm
+            if fill_f: cell.fill = fill_f
+        ws.row_dimensions[ri].height = 18
+    ws.freeze_panes = "A3"
 
-    for idx, (key, nombre, ancho) in enumerate(columnas, start=1):
-        cell = ws.cell(row=2, column=idx, value=nombre)
-        cell.font=ft_header; cell.fill=fill_header; cell.alignment=centro; cell.border=borde
-        ws.column_dimensions[get_column_letter(idx)].width = ancho
-    ws.row_dimensions[2].height = 28
+    # ── Hoja 2: Productos ──
+    ws2 = wb.create_sheet("Detalle Productos")
+    cols2 = [
+        ("lote_id","ID LOTE",8),("nombre","PRODUCTO",28),
+        ("largo","L(cm)",8),("ancho","A(cm)",8),("alto","H(cm)",8),
+        ("cantidad","CANT.",7),("vol_unit_m3","VOL/U m³",12),
+        ("vol_total_m3","VOL TOTAL m³",14),("peso_kg","PESO REAL kg",13),
+        ("peso_vol_kg","PESO VOL kg",12),("peso_cobrable","P. COBRABLE kg",15),
+    ]
+    ws2.merge_cells(f"A1:{get_column_letter(len(cols2))}1")
+    ws2["A1"] = "Detalle de Productos por Lote"
+    ws2["A1"].font = ft_tit; ws2["A1"].fill = fill_tit; ws2["A1"].alignment = centro
+    ws2.row_dimensions[1].height = 26
+    for ci, (_, nombre, ancho) in enumerate(cols2, 1):
+        c = ws2.cell(2, ci, nombre)
+        c.font = ft_hdr; c.fill = fill_hdr; c.alignment = centro; c.border = borde
+        ws2.column_dimensions[get_column_letter(ci)].width = ancho
+    ws2.row_dimensions[2].height = 24
+    fila2 = 3
+    for _, lote in df_lotes.iterrows():
+        lid = int(lote["id"])
+        df_p = prod_por_lote.get(lid, pd.DataFrame())
+        if df_p.empty: continue
+        for _, prod in df_p.iterrows():
+            fill_f2 = fill_alt if fila2 % 2 == 0 else None
+            vals = [lid, prod.get("nombre",""), prod.get("largo",""),
+                    prod.get("ancho",""), prod.get("alto",""), prod.get("cantidad",""),
+                    prod.get("vol_unit_m3",""), prod.get("vol_total_m3",""),
+                    prod.get("peso_kg",""), prod.get("peso_vol_kg",""),
+                    prod.get("peso_cobrable","")]
+            for ci, v in enumerate(vals, 1):
+                cell = ws2.cell(fila2, ci, v)
+                cell.font = ft_norm; cell.border = borde
+                cell.alignment = izq if ci == 2 else centro
+                if fill_f2: cell.fill = fill_f2
+            ws2.row_dimensions[fila2].height = 18
+            fila2 += 1
+    ws2.freeze_panes = "A3"
 
-    for row_idx, (_, fila) in enumerate(df_inspecciones.iterrows(), start=3):
-        insp_id = int(fila["id"])
-        df_it   = items_por_id.get(insp_id, pd.DataFrame())
-        num_nc  = len(df_it[df_it["resultado"]=="NC"]) if not df_it.empty else 0
-        num_c   = len(df_it[df_it["resultado"]=="C"])  if not df_it.empty else 0
-        estado_val = str(fila.get("estado",""))
-        es_rech = "Rechazada"     in estado_val
-        es_obs  = "Observaciones" in estado_val
-        fill_f  = fill_nc_row if es_rech else (fill_obs_row if es_obs else (fill_alt if row_idx%2==0 else None))
+    # ── Hoja 3: Resumen por Responsable ──
+    ws3 = wb.create_sheet("Por Responsable")
+    ws3.merge_cells("A1:F1")
+    ws3["A1"] = "Resumen por Responsable"
+    ws3["A1"].font = ft_tit; ws3["A1"].fill = fill_tit; ws3["A1"].alignment = centro
+    ws3.row_dimensions[1].height = 26
+    hdrs3 = ["RESPONSABLE","TOTAL LOTES","VOL TOTAL m³","PESO TOTAL kg","EF. PROM %","CONT. USADOS"]
+    anchos3 = [30,12,14,14,12,13]
+    for ci, (h, w) in enumerate(zip(hdrs3, anchos3), 1):
+        c = ws3.cell(2, ci, h)
+        c.font = ft_hdr; c.fill = fill_hdr; c.alignment = centro; c.border = borde
+        ws3.column_dimensions[get_column_letter(ci)].width = w
+    if not df_lotes.empty and "responsable" in df_lotes.columns:
+        res = df_lotes.groupby("responsable", as_index=False).agg(
+            total=("responsable","count"),
+            vol_total=("vol_total_m3","sum"),
+            peso_total=("peso_total_kg","sum"),
+            ef_prom=("eficiencia_pct","mean"),
+            cont_usados=("contenedores_nec","sum"),
+        ).sort_values("total", ascending=False)
+        for ri, row in enumerate(res.itertuples(), 3):
+            fill_f = fill_alt if ri % 2 == 0 else None
+            vals = [row.responsable, int(row.total),
+                    round(float(row.vol_total or 0),3),
+                    round(float(row.peso_total or 0),2),
+                    f"{round(float(row.ef_prom or 0),1)}%",
+                    int(row.cont_usados or 0)]
+            for ci, v in enumerate(vals, 1):
+                cell = ws3.cell(ri, ci, v)
+                cell.font = ft_norm; cell.border = borde
+                cell.alignment = izq if ci == 1 else centro
+                if fill_f: cell.fill = fill_f
+            ws3.row_dimensions[ri].height = 18
+    ws3.freeze_panes = "A3"
 
-        valores = {
-            "id":insp_id,"fecha_ini":str(fila.get("fecha_ini","")),
-            "fecha_fin":str(fila.get("fecha_fin","")),
-            "maquina":fila.get("maquina",""),"modelo":fila.get("modelo",""),
-            "marca":fila.get("marca",""),"placa":fila.get("placa",""),
-            "trabajador":fila.get("trabajador",""),"revisado_por":fila.get("revisado_por",""),
-            "cliente_proyecto":fila.get("cliente_proyecto",""),
-            "responsable_mantenimiento":fila.get("responsable_mantenimiento",""),
-            "estado":estado_val,"num_nc":num_nc,"num_c":num_c,
-            "observaciones":fila.get("observaciones",""),
-        }
-        for col_idx,(key,_,_) in enumerate(columnas,start=1):
-            val  = valores.get(key,"")
-            cell = ws.cell(row=row_idx,column=col_idx,value=str(val) if val!="" else "")
-            cell.border=borde
-            cell.alignment=centro if key in ("id","fecha_ini","fecha_fin","estado","num_nc","num_c","placa") else izq
-            if key=="num_nc" and num_nc>0: cell.font=ft_nc
-            elif key=="estado" and "Aprobada" in str(val): cell.font=ft_apro
-            else: cell.font=ft_normal
-            if fill_f: cell.fill=fill_f
-        ws.row_dimensions[row_idx].height=18
-
-    aprobadas = len(df_inspecciones[df_inspecciones["estado"].str.contains("Aprobada",na=False)])
-    obs_count = len(df_inspecciones[df_inspecciones["estado"].str.contains("Observaciones",na=False)])
-    rech      = len(df_inspecciones[df_inspecciones["estado"].str.contains("Rechazada",na=False)])
-    total_row = len(df_inspecciones)+3
-    try:
-        ws.merge_cells(f"A{total_row}:{get_column_letter(total_cols)}{total_row}")
-    except Exception:
-        pass
-    ct = ws.cell(row=total_row,column=1,
-                 value=f"TOTAL: {len(df_inspecciones)}   |   ✅ Aprobadas: {aprobadas}   ⚠️ Con Obs: {obs_count}   ❌ Rechazadas: {rech}")
-    ct.font=ft_total; ct.fill=fill_total; ct.alignment=centro
-    ws.freeze_panes="A3"
-
-    # HOJA 2 — Detalle Ítems
-    ws2=wb.create_sheet("Detalle Ítems")
-    ws2.merge_cells("A1:I1")
-    ws2["A1"]="Detalle de Ítems por Inspección (Semanal)"
-    ws2["A1"].font=ft_titulo; ws2["A1"].fill=fill_titulo; ws2["A1"].alignment=centro
-    ws2.row_dimensions[1].height=26
-    hdrs2=["ID INSP.","F. INICIO","F. FIN","MÁQUINA","SECCIÓN","N°","DESCRIPCIÓN DEL ÍTEM","DÍA","RESULTADO"]
-    anchos2=[8,12,12,20,30,5,65,8,10]
-    for ci,(h,w) in enumerate(zip(hdrs2,anchos2),start=1):
-        c=ws2.cell(2,ci,h); c.font=ft_header; c.fill=fill_header; c.alignment=centro; c.border=borde
-        ws2.column_dimensions[get_column_letter(ci)].width=w
-    ws2.row_dimensions[2].height=24
-    fila2=3
-    for _,insp in df_inspecciones.iterrows():
-        insp_id=int(insp["id"])
-        df_it=items_por_id.get(insp_id,pd.DataFrame())
-        if df_it.empty: continue
-        for _,item in df_it.iterrows():
-            res=str(item.get("resultado","C"))
-            fill_item=PatternFill("solid",start_color="FADBD8") if res=="NC" else (
-                      PatternFill("solid",start_color="EBF5FB") if fila2%2==0 else None)
-            vals=[insp_id,str(insp.get("fecha_ini","")),str(insp.get("fecha_fin","")),
-                  str(insp.get("maquina","")),str(item.get("seccion","")),
-                  int(item.get("item_numero",0)),str(item.get("descripcion","")),
-                  str(item.get("dia","General")),res]
-            for ci,v in enumerate(vals,start=1):
-                c=ws2.cell(fila2,ci,v)
-                c.font=ft_nc if res=="NC" else ft_normal
-                c.border=borde; c.alignment=izq if ci==7 else centro
-                if fill_item: c.fill=fill_item
-            ws2.row_dimensions[fila2].height=18; fila2+=1
-    ws2.freeze_panes="A3"
-
-    # HOJA 3 — Por Máquina
-    ws3=wb.create_sheet("Por Máquina")
-    ws3.merge_cells("A1:H1"); ws3["A1"]="Resumen de Inspecciones por Máquina"
-    ws3["A1"].font=ft_titulo; ws3["A1"].fill=fill_titulo; ws3["A1"].alignment=centro
-    ws3.row_dimensions[1].height=26
-    hdrs3=["MÁQUINA","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN","ÚLTIMO INSPECTOR","ÚLTIMA SEMANA"]
-    anchos3=[22,12,14,14,14,14,28,14]
-    for ci,(h,w) in enumerate(zip(hdrs3,anchos3),start=1):
-        c=ws3.cell(2,ci,h); c.font=ft_header; c.fill=fill_header; c.alignment=centro; c.border=borde
-        ws3.column_dimensions[get_column_letter(ci)].width=w
-    ws3.row_dimensions[2].height=24
-    if not df_inspecciones.empty and "maquina" in df_inspecciones.columns:
-        fecha_col="fecha_ini"
-        resumen_maq=df_inspecciones.groupby("maquina",as_index=False).agg(
-            total=("maquina","count"),
-            aprobadas=("estado",lambda x:x.str.contains("Aprobada",na=False).sum()),
-            con_obs=("estado",lambda x:x.str.contains("Observaciones",na=False).sum()),
-            rechazadas=("estado",lambda x:x.str.contains("Rechazada",na=False).sum()),
-            ultima_fecha=(fecha_col,"max"),
-        ).sort_values("total",ascending=False)
-        ultimo_insp_map=(df_inspecciones.sort_values(fecha_col).groupby("maquina")["trabajador"]
-                         .last().reset_index().rename(columns={"trabajador":"ultimo_insp"}))
-        resumen_maq=resumen_maq.merge(ultimo_insp_map,on="maquina",how="left")
-        resumen_maq["ultima_fecha"]=resumen_maq["ultima_fecha"].astype(str)
-        for i,row in enumerate(resumen_maq.itertuples(),start=3):
-            pct=f"{round(row.aprobadas/row.total*100,1)}%" if row.total>0 else "0%"
-            fill_r=PatternFill("solid",start_color="EBF5FB") if i%2==0 else None
-            vals=[row.maquina,int(row.total),int(row.aprobadas),int(row.con_obs),
-                  int(row.rechazadas),pct,str(row.ultimo_insp) if row.ultimo_insp else "",str(row.ultima_fecha)]
-            for ci,v in enumerate(vals,start=1):
-                c=ws3.cell(i,ci,v); c.font=ft_normal; c.border=borde
-                c.alignment=izq if ci in (1,7) else centro
-                if fill_r: c.fill=fill_r
-            ws3.row_dimensions[i].height=18
-    ws3.freeze_panes="A3"
-
-    # HOJA 4 — Ranking NC
-    ws4=wb.create_sheet("Ranking NC")
-    ws4.merge_cells("A1:E1"); ws4["A1"]="Ranking de No Conformidades por Ítem"
-    ws4["A1"].font=ft_titulo; ws4["A1"].fill=fill_titulo; ws4["A1"].alignment=centro
-    ws4.row_dimensions[1].height=26
-    hdrs4=["SECCIÓN","DESCRIPCIÓN DEL ÍTEM","DÍA","# NC","% NC"]
-    anchos4=[30,65,8,8,10]
-    for ci,(h,w) in enumerate(zip(hdrs4,anchos4),start=1):
-        c=ws4.cell(2,ci,h); c.font=ft_header
-        c.fill=PatternFill("solid",start_color="922B21")
-        c.alignment=centro; c.border=borde
-        ws4.column_dimensions[get_column_letter(ci)].width=w
-    ws4.row_dimensions[2].height=24
-    if not df_all_items.empty:
-        total_insp=len(df_inspecciones)
-        ranking_nc=(df_all_items.groupby(["seccion","descripcion","dia"],as_index=False)
-                    .agg(num_nc=("resultado",lambda x:(x=="NC").sum()))
-                    .sort_values("num_nc",ascending=False))
-        for i,row in enumerate(ranking_nc.itertuples(),start=3):
-            pct=f"{round(row.num_nc/total_insp*100,1)}%" if total_insp>0 else "0%"
-            fill_r4=(PatternFill("solid",start_color="FADBD8") if row.num_nc>0 and i%2==0 else
-                    (PatternFill("solid",start_color="EBF5FB") if i%2==0 else None))
-            vals=[row.seccion,row.descripcion,str(row.dia),int(row.num_nc),pct]
-            for ci,v in enumerate(vals,start=1):
-                c=ws4.cell(i,ci,v)
-                c.font=ft_nc if row.num_nc>0 and ci==4 else ft_normal
-                c.border=borde; c.alignment=izq if ci==2 else centro
-                if fill_r4: c.fill=fill_r4
-            ws4.row_dimensions[i].height=18
-    ws4.freeze_panes="A3"
-
-    # HOJA 5 — Por Inspector
-    ws5=wb.create_sheet("Por Inspector")
-    ws5.merge_cells("A1:F1"); ws5["A1"]="Resumen por Inspector / Trabajador"
-    ws5["A1"].font=ft_titulo; ws5["A1"].fill=fill_titulo; ws5["A1"].alignment=centro
-    ws5.row_dimensions[1].height=26
-    hdrs5=["TRABAJADOR","TOTAL INSP.","✅ APROBADAS","⚠️ CON OBS.","❌ RECHAZADAS","% APROBACIÓN"]
-    anchos5=[30,12,14,14,14,14]
-    for ci,(h,w) in enumerate(zip(hdrs5,anchos5),start=1):
-        c=ws5.cell(2,ci,h); c.font=ft_header
-        c.fill=PatternFill("solid",start_color="1A5276")
-        c.alignment=centro; c.border=borde
-        ws5.column_dimensions[get_column_letter(ci)].width=w
-    ws5.row_dimensions[2].height=24
-    if not df_inspecciones.empty and "trabajador" in df_inspecciones.columns:
-        df_tf=df_inspecciones[df_inspecciones["trabajador"].notna()&(df_inspecciones["trabajador"].str.strip()!="")]
-        if not df_tf.empty:
-            resumen_insp=df_tf.groupby("trabajador",as_index=False).agg(
-                total=("trabajador","count"),
-                aprobadas=("estado",lambda x:x.str.contains("Aprobada",na=False).sum()),
-                con_obs=("estado",lambda x:x.str.contains("Observaciones",na=False).sum()),
-                rechazadas=("estado",lambda x:x.str.contains("Rechazada",na=False).sum()),
-            ).sort_values("total",ascending=False)
-            for i,row in enumerate(resumen_insp.itertuples(),start=3):
-                pct=f"{round(row.aprobadas/row.total*100,1)}%" if row.total>0 else "0%"
-                fill_r=PatternFill("solid",start_color="EBF5FB") if i%2==0 else None
-                vals=[row.trabajador,int(row.total),int(row.aprobadas),int(row.con_obs),int(row.rechazadas),pct]
-                for ci,v in enumerate(vals,start=1):
-                    c=ws5.cell(i,ci,v); c.font=ft_normal; c.border=borde
-                    c.alignment=izq if ci==1 else centro
-                    if fill_r: c.fill=fill_r
-                ws5.row_dimensions[i].height=18
-    ws5.freeze_panes="A3"
-
-    output=io.BytesIO()
+    output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
 
-# ==================== PESTAÑAS ====================
+# ==================== GRÁFICOS ====================
+def grafico_gauge(eficiencia: float):
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=eficiencia,
+        title={"text": "% Llenado", "font": {"color": "white"}},
+        gauge={
+            "axis":      {"range": [0, 100], "tickcolor": "white"},
+            "bar":       {"color": "#00d4ff"},
+            "bgcolor":   "#1a1a2e",
+            "steps": [
+                {"range": [0, 50],   "color": "#2c1654"},
+                {"range": [50, 80],  "color": "#1a3a5c"},
+                {"range": [80, 100], "color": "#0d4f3c"},
+            ],
+            "threshold": {"line": {"color": "#ff4b6e", "width": 4}, "value": 100}
+        },
+        number={"font": {"color": "#00d4ff", "size": 46}},
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(10,10,30,1)",
+        font=dict(color="white"),
+        height=300,
+        margin=dict(t=40, b=10, l=10, r=10),
+    )
+    return fig
 
-def tab_nueva_inspeccion(db: DB):
-    st.markdown("### Registrar Nueva Inspección Preoperacional Semanal")
+def grafico_torta(df: pd.DataFrame):
+    vals = df["largo"] * df["ancho"] * df["alto"] * df["cantidad"]
+    fig = go.Figure(go.Pie(
+        labels=df["nombre"], values=vals,
+        hole=0.45,
+        marker=dict(colors=px.colors.qualitative.Vivid),
+        textinfo="label+percent",
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(10,10,30,1)",
+        font=dict(color="white"),
+        height=300,
+        margin=dict(t=20, b=10),
+    )
+    return fig
 
-    st.markdown("<div class='seccion-titulo'>🏭 1. DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
-    d1,d2,d3,d4,d5,d6 = st.columns(6)
-    with d1: fecha_ini_insp = st.date_input("📅 Fecha Inicio", datetime.now(), key="n_fecha_ini")
-    with d2: fecha_fin_insp = st.date_input("📅 Fecha Fin", datetime.now()+timedelta(days=6), key="n_fecha_fin")
-    with d3: maquina_sel   = st.selectbox("⚙️ Máquina", MAQUINAS, key="n_maquina")
-    with d4: modelo_inp    = st.text_input("Modelo", placeholder="Ej: ZF-200X", key="n_modelo")
-    with d5: marca_inp     = st.text_input("Marca",  placeholder="Ej: SCA",     key="n_marca")
-    with d6: placa_inp     = st.text_input("Placa / Serie", placeholder="Ej: MQ-001", key="n_placa")
+def grafico_barras_comp(df: pd.DataFrame):
+    df_sorted = df.sort_values("vol_total_m3", ascending=True)
+    fig = px.bar(
+        df_sorted, x="vol_total_m3", y="nombre", orientation="h",
+        text="vol_total_m3", color="vol_total_m3",
+        color_continuous_scale="Blues",
+    )
+    fig.update_traces(texttemplate="%{text:.4f} m³", textposition="outside")
+    fig.update_layout(
+        paper_bgcolor="rgba(10,10,30,1)",
+        plot_bgcolor="rgba(10,10,30,1)",
+        font=dict(color="white"),
+        height=max(250, len(df) * 38),
+        margin=dict(t=10, b=10),
+        coloraxis_showscale=False,
+        xaxis_title="Volumen total (m³)",
+        yaxis_title="",
+    )
+    return fig
 
-    if fecha_fin_insp < fecha_ini_insp:
-        st.error("⚠️ La fecha de fin no puede ser anterior a la fecha de inicio.")
-        return
 
-    delta_dias = min((fecha_fin_insp - fecha_ini_insp).days + 1, 7)
-    dias_nombres_es = ["Lun","Mar","Mier","Juev","Vier","Sáb","Dom"]
-    dias_labels = []
-    for i in range(delta_dias):
-        d = fecha_ini_insp + timedelta(days=i)
-        dias_labels.append(f"{dias_nombres_es[d.weekday()]} {d.strftime('%d/%m')}")
+# ==================== TAB 1: NUEVA CUBIACIÓN ====================
+def tab_nueva_cubicacion(db: DB):
+    st.markdown("### 📦 Registrar Nueva Cubicación")
 
-    st.markdown("<div class='seccion-titulo'>📅 2. DÍAS TRABAJADOS EN LA SEMANA</div>", unsafe_allow_html=True)
-    st.caption("Marca los días en que la máquina fue operada")
+    # ── Datos del lote ──
+    st.markdown("<div class='seccion-titulo'>📋 1. DATOS DEL LOTE</div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        nombre_lote  = st.text_input("Nombre del lote / despacho *", placeholder="Ej: Despacho Semana 22", key="nc_nombre")
+    with c2:
+        responsable  = st.text_input("Responsable *", placeholder="Nombre del operario/logístico", key="nc_resp")
+    with c3:
+        cliente_proj = st.text_input("Cliente / Proyecto", placeholder="Ej: Proyecto Norte", key="nc_cli")
 
-    cols_dias = st.columns(len(dias_labels))
-    dias_activos = []
-    for j, label in enumerate(dias_labels):
-        with cols_dias[j]:
-            if st.checkbox(label, value=True, key=f"n_dia_{j}"):
-                dias_activos.append(label)
+    # ── Configuración contenedor ──
+    st.markdown("<div class='seccion-titulo'>🚛 2. CONTENEDOR / VEHÍCULO</div>", unsafe_allow_html=True)
+    presets = {
+        "Personalizado":                   (0, 0, 0),
+        "20' Estándar (589×235×239 cm)":   (589, 235, 239),
+        "40' Estándar (1200×235×239 cm)":  (1200, 235, 239),
+        "40' High Cube (1200×235×270 cm)": (1200, 235, 270),
+        "Furgoneta (300×180×180 cm)":      (300, 180, 180),
+        "Camión mediano (600×240×220 cm)": (600, 240, 220),
+    }
+    cp1, cp2, cp3, cp4, cp5 = st.columns([3, 1, 1, 1, 2])
+    with cp1:
+        tipo_cont = st.selectbox("Tipo predefinido", list(presets.keys()), key="nc_tipo")
+    dl, da, dh = presets[tipo_cont]
+    with cp2:
+        cont_l = st.number_input("Largo (cm)", value=float(dl) if dl else 589.0, min_value=1.0, key="nc_cl")
+    with cp3:
+        cont_a = st.number_input("Ancho (cm)", value=float(da) if da else 235.0, min_value=1.0, key="nc_ca")
+    with cp4:
+        cont_h = st.number_input("Alto (cm)",  value=float(dh) if dh else 239.0, min_value=1.0, key="nc_ch")
+    with cp5:
+        factor_vol = st.selectbox("Factor peso volumétrico (divisor)", [5000, 6000, 4000], key="nc_factor")
 
-    if not dias_activos:
-        st.warning("Selecciona al menos un día trabajado.")
-        return
+    contenedor = {"largo": cont_l, "ancho": cont_a, "alto": cont_h}
 
-    if db.verificar_inspeccion_existente(fecha_ini_insp, maquina_sel):
-        st.warning(f"⚠️ Ya existe una inspección para **{maquina_sel}** iniciando el **{fecha_ini_insp}**.")
+    # ── Productos ──
+    st.markdown("<div class='seccion-titulo'>📦 3. PRODUCTOS A CUBICAR</div>", unsafe_allow_html=True)
+    modo = st.radio("Modo de ingreso", ["Manual", "Cargar CSV/Excel"], horizontal=True, key="nc_modo")
 
-    items_antes_uso = get_items_antes_uso(maquina_sel)
+    if "productos_temp" not in st.session_state:
+        st.session_state.productos_temp = pd.DataFrame(
+            columns=["nombre","largo","ancho","alto","peso_kg","cantidad"]
+        )
 
-    st.markdown("<div class='seccion-titulo'>🔍 3. LISTA DE ACTIVIDADES</div>", unsafe_allow_html=True)
+    if modo == "Manual":
+        with st.form("form_prod", clear_on_submit=True):
+            fc1, fc2 = st.columns(2)
+            pnom  = fc1.text_input("Nombre del producto", placeholder='Ej: Caja TV 55"')
+            pcant = fc2.number_input("Cantidad", min_value=1, value=1)
+            fc3, fc4, fc5, fc6 = st.columns(4)
+            pl = fc3.number_input("Largo (cm)", min_value=0.1, value=40.0)
+            pa = fc4.number_input("Ancho (cm)", min_value=0.1, value=30.0)
+            ph = fc5.number_input("Alto (cm)",  min_value=0.1, value=20.0)
+            pp = fc6.number_input("Peso (kg)",  min_value=0.0, value=1.0)
+            agregar = st.form_submit_button("➕ Agregar producto", use_container_width=True)
+            if agregar and pnom:
+                nueva = pd.DataFrame([{"nombre":pnom,"largo":pl,"ancho":pa,"alto":ph,
+                                        "peso_kg":pp,"cantidad":pcant}])
+                st.session_state.productos_temp = pd.concat(
+                    [st.session_state.productos_temp, nueva], ignore_index=True
+                )
+                st.success(f"✅ '{pnom}' agregado.")
 
-    render_seccion_por_dia("ANTES DE SU USO", items_antes_uso, "new", "au", dias_activos)
-    render_seccion_por_dia("🦺 ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP, "new", "epp", dias_activos)
-    render_seccion_por_dia("⚡ SEGURIDAD ELÉCTRICA", ITEMS_ELECTRICA, "new", "elec", dias_activos)
+    else:
+        archivo = st.file_uploader("Sube CSV o Excel", type=["csv","xlsx"], key="nc_file")
+        if archivo:
+            df_up = pd.read_csv(archivo) if archivo.name.endswith(".csv") else pd.read_excel(archivo)
+            cols_req = {"nombre","largo","ancho","alto","peso_kg","cantidad"}
+            if cols_req.issubset(set(df_up.columns)):
+                st.session_state.productos_temp = df_up[list(cols_req)].copy()
+                st.success(f"✅ {len(df_up)} productos cargados.")
+            else:
+                st.error(f"Columnas requeridas: {cols_req}")
 
-    st.markdown("<div class='seccion-titulo'>📋 4. DATOS DE CONTROL — <span class='campo-obligatorio'>* Todos los campos son obligatorios</span></div>",
-                unsafe_allow_html=True)
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: trabajador_inp = st.text_input("👷 Trabajador *",         placeholder="Nombre del operario",    key="n_trab")
-    with c2: revisado_inp   = st.text_input("👤 Revisado por *",       placeholder="Supervisor / Jefe",      key="n_rev")
-    with c3: cliente_inp    = st.text_input("🏢 Cliente / Proyecto *", placeholder="Nombre del proyecto",    key="n_cli")
-    with c4: resp_mant_inp  = st.text_input("🔧 Resp. Mantenimiento *",placeholder="Nombre del responsable", key="n_mant")
+    # Plantilla descargable
+    plantilla = pd.DataFrame([{"nombre":"Ejemplo","largo":40,"ancho":30,"alto":20,"peso_kg":2.5,"cantidad":5}])
+    st.download_button("📥 Plantilla CSV", data=plantilla.to_csv(index=False).encode(),
+                       file_name="plantilla_cubicaje.csv", mime="text/csv")
 
-    e1,e2 = st.columns([1,3])
-    with e1: estado_inp = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, key="n_estado")
-    with e2: obs_inp    = st.text_area("💬 Comentarios / Observaciones",
-                                        placeholder="Describa cualquier anomalía. REPORTAR INMEDIATAMENTE al encargado de equipos y al departamento de mantenimiento.",
-                                        height=90, key="n_obs")
+    df_temp = st.session_state.productos_temp
+    if not df_temp.empty:
+        st.markdown("#### Productos en cola")
+        edited = st.data_editor(df_temp, use_container_width=True, num_rows="dynamic", key="nc_editor")
+        st.session_state.productos_temp = edited
 
+        col_limpiar, _ = st.columns([1, 4])
+        with col_limpiar:
+            if st.button("🗑️ Limpiar lista"):
+                st.session_state.productos_temp = pd.DataFrame(
+                    columns=["nombre","largo","ancho","alto","peso_kg","cantidad"]
+                )
+                st.rerun()
+
+        # ── Preview en tiempo real ──
+        df_calc = enriquecer_df(st.session_state.productos_temp, factor_vol)
+        res = calcular_cubicaje(df_calc, contenedor)
+
+        st.markdown("<div class='seccion-titulo'>📊 PREVIEW DE CUBICAJE</div>", unsafe_allow_html=True)
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.markdown(f"""<div class='metric-card'><div class='metric-value'>{int(df_calc['cantidad'].sum())}</div>
+                        <div class='metric-label'>Unidades totales</div></div>""", unsafe_allow_html=True)
+        k2.markdown(f"""<div class='metric-card'><div class='metric-value'>{res['vol_total_m3']:.3f}</div>
+                        <div class='metric-label'>Vol. total m³</div></div>""", unsafe_allow_html=True)
+        k3.markdown(f"""<div class='metric-card'><div class='metric-value'>{res['eficiencia_pct']:.1f}%</div>
+                        <div class='metric-label'>Eficiencia contenedor</div></div>""", unsafe_allow_html=True)
+        k4.markdown(f"""<div class='metric-card'><div class='metric-value'>{res['contenedores_nec']}</div>
+                        <div class='metric-label'>Contenedores necesarios</div></div>""", unsafe_allow_html=True)
+        k5.markdown(f"""<div class='metric-card'><div class='metric-value'>{(df_calc['peso_kg']*df_calc['cantidad']).sum():.1f}</div>
+                        <div class='metric-label'>Peso real total kg</div></div>""", unsafe_allow_html=True)
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.plotly_chart(grafico_torta(df_calc), use_container_width=True)
+        with g2:
+            st.plotly_chart(grafico_gauge(res["eficiencia_pct"]), use_container_width=True)
+
+    # ── Observaciones y Guardar ──
+    st.markdown("<div class='seccion-titulo'>💬 4. OBSERVACIONES Y GUARDAR</div>", unsafe_allow_html=True)
+    obs = st.text_area("Observaciones / notas del despacho", height=80, key="nc_obs")
     st.divider()
-    if st.button("💾 Guardar Inspección Semanal", type="primary", use_container_width=True, key="btn_guardar"):
-        errores = validar_datos_control(trabajador_inp, revisado_inp, cliente_inp, resp_mant_inp)
-        if not maquina_sel:
-            errores.insert(0,"⚙️ La **Máquina** es obligatoria.")
+
+    if st.button("💾 Guardar Cubicación", type="primary", use_container_width=True):
+        errores = []
+        if not nombre_lote.strip():
+            errores.append("📦 **Nombre del lote** es obligatorio.")
+        if not responsable.strip():
+            errores.append("👷 **Responsable** es obligatorio.")
+        if st.session_state.productos_temp.empty:
+            errores.append("📋 Debes agregar al menos **un producto**.")
         if errores:
-            st.error("❌ Por favor completa los siguientes campos obligatorios:")
-            for err in errores:
-                st.markdown(f"- {err}")
+            for e in errores: st.error(e)
         else:
-            items_form = construir_items_semanal("new", dias_activos, maquina_sel)
-            datos = {
-                "fecha_ini": fecha_ini_insp, "fecha_fin": fecha_fin_insp,
-                "maquina": maquina_sel, "modelo": modelo_inp,
-                "marca": marca_inp, "placa": placa_inp,
-                "trabajador": trabajador_inp.strip(), "revisado_por": revisado_inp.strip(),
-                "cliente_proyecto": cliente_inp.strip(),
-                "responsable_mantenimiento": resp_mant_inp.strip(),
-                "estado": estado_inp.split(" ",1)[1] if " " in estado_inp else estado_inp,
-                "observaciones": obs_inp,
+            df_calc = enriquecer_df(st.session_state.productos_temp, factor_vol)
+            res     = calcular_cubicaje(df_calc, contenedor)
+            datos_lote = {
+                "nombre_lote":    nombre_lote.strip(),
+                "responsable":    responsable.strip(),
+                "cliente_proyecto": cliente_proj.strip(),
+                "cont_tipo":      tipo_cont,
+                "cont_largo":     cont_l,
+                "cont_ancho":     cont_a,
+                "cont_alto":      cont_h,
+                "factor_vol":     factor_vol,
+                "eficiencia_pct": res["eficiencia_pct"],
+                "contenedores_nec": res["contenedores_nec"],
+                "vol_total_m3":   round(res["vol_total_m3"], 4),
+                "peso_total_kg":  round((df_calc["peso_kg"] * df_calc["cantidad"]).sum(), 2),
+                "observaciones":  obs,
             }
-            nc_count = sum(1 for it in items_form if it["resultado"]=="NC")
-            if db.guardar_inspeccion(datos, items_form):
-                st.success(f"✅ Inspección guardada — {maquina_sel} | {fecha_ini_insp} → {fecha_fin_insp} | {nc_count} NC detectadas")
-                if nc_count > 0:
-                    st.warning(f"⚠️ Se detectaron **{nc_count} No Conformidades**. Reportar al encargado de mantenimiento.")
+            productos_list = []
+            for _, row in df_calc.iterrows():
+                productos_list.append({
+                    "nombre":       row["nombre"],
+                    "largo":        row["largo"],
+                    "ancho":        row["ancho"],
+                    "alto":         row["alto"],
+                    "peso_kg":      row["peso_kg"],
+                    "cantidad":     int(row["cantidad"]),
+                    "vol_unit_m3":  round(row["vol_unit_m3"], 6),
+                    "vol_total_m3": round(row["vol_total_m3"], 6),
+                    "peso_vol_kg":  round(row["peso_vol_kg"], 3),
+                    "peso_cobrable":round(row["peso_cobrable"], 3),
+                })
+            if db.guardar_lote(datos_lote, productos_list):
+                st.success(f"✅ Cubicación **{nombre_lote}** guardada — Eficiencia: {res['eficiencia_pct']:.1f}% | "
+                           f"Contenedores: {res['contenedores_nec']}")
+                st.session_state.productos_temp = pd.DataFrame(
+                    columns=["nombre","largo","ancho","alto","peso_kg","cantidad"]
+                )
                 st.balloons()
 
 
+# ==================== TAB 2: HISTORIAL ====================
 def tab_historial(db: DB):
-    st.markdown("### 🔍 Historial de Inspecciones")
+    st.markdown("### 🔍 Historial de Cubicaciones")
 
     with st.expander("🛠️ Filtros", expanded=True):
-        f1,f2,f3,f4,f5 = st.columns(5)
-        with f1: fi    = st.date_input("Desde", datetime.now()-timedelta(days=30), key="h_fi")
-        with f2: ff    = st.date_input("Hasta", datetime.now(), key="h_ff")
-        with f3:
-            maq_opts = ["Todas"] + MAQUINAS
-            fm = st.selectbox("Máquina", maq_opts, key="h_fm")
-        with f4: ftrab = st.text_input("Trabajador", key="h_trab")
-        with f5:
-            est_opts = ["Todos"] + [e.split(" ",1)[1] for e in ESTADOS_INSPECCION]
-            fe = st.selectbox("Estado", est_opts, key="h_fe")
+        f1, f2, f3, f4 = st.columns(4)
+        with f1: fi   = st.date_input("Desde", datetime.now().replace(day=1), key="h_fi")
+        with f2: ff   = st.date_input("Hasta", datetime.now(), key="h_ff")
+        with f3: ftrab = st.text_input("Responsable", key="h_resp")
+        with f4: fcli  = st.text_input("Cliente / Proyecto", key="h_cli")
 
-    df_hist = db.obtener_inspecciones(
-        fi, ff,
-        fm    if fm    != "Todas" else None,
-        fe    if fe    != "Todos" else None,
-        ftrab if ftrab else None
-    )
+    df_hist = db.obtener_lotes(fi, ff,
+                                ftrab if ftrab else None,
+                                fcli  if fcli  else None)
 
-    if not df_hist.empty:
-        k1,k2,k3,k4 = st.columns(4)
-        k1.metric("Total Inspecciones", len(df_hist))
-        k2.metric("✅ Aprobadas",       len(df_hist[df_hist["estado"].str.contains("Aprobada",na=False)]))
-        k3.metric("⚠️ Con Observaciones",len(df_hist[df_hist["estado"].str.contains("Observaciones",na=False)]))
-        k4.metric("❌ Rechazadas",       len(df_hist[df_hist["estado"].str.contains("Rechazada",na=False)]))
+    if df_hist.empty:
+        st.warning("No hay registros con los filtros seleccionados.")
+        return
 
-        st.divider()
-        col_e1,col_e2 = st.columns([2,5])
-        with col_e1:
-            nombre_rep = st.text_input("Nombre del reporte", value="Inspecciones_Preop", key="rep_nombre")
-        with col_e2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            excel_data = generar_excel(df_hist, db, titulo=nombre_rep)
-            st.download_button(
-                "⬇️ Descargar Excel", data=excel_data,
-                file_name=f"{nombre_rep}_{datetime.now(pytz.timezone('America/Bogota')).strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+    # KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total lotes",          len(df_hist))
+    k2.metric("Vol. total m³",        f"{df_hist['vol_total_m3'].sum():.3f}")
+    k3.metric("Peso total kg",        f"{df_hist['peso_total_kg'].sum():.1f}")
+    k4.metric("Eficiencia promedio",  f"{df_hist['eficiencia_pct'].mean():.1f}%")
 
-        st.divider()
-        cols_tabla = ["id","fecha_ini","fecha_fin","maquina","trabajador","revisado_por",
-                      "cliente_proyecto","placa","estado","observaciones"]
-        cols_ex = [c for c in cols_tabla if c in df_hist.columns]
-        st.dataframe(df_hist[cols_ex], use_container_width=True, hide_index=True)
+    st.divider()
 
-        st.divider()
-        st.subheader("✏️ Ver Detalle / Editar")
-        df_hist["_label"] = df_hist.apply(
-            lambda r: f"ID {r['id']} | {r.get('fecha_ini','')} → {r.get('fecha_fin','')} | {r['maquina']} | {r.get('trabajador','')} | {r.get('estado','')}",
-            axis=1
+    # Descarga Excel
+    col_e1, col_e2 = st.columns([2, 5])
+    with col_e1:
+        rep_nombre = st.text_input("Nombre del reporte", value="Cubicaje_Reporte", key="rep_nom")
+    with col_e2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        excel_data = generar_excel(df_hist, db)
+        tz_col = pytz.timezone("America/Bogota")
+        st.download_button(
+            "⬇️ Descargar Excel",
+            data=excel_data,
+            file_name=f"{rep_nombre}_{datetime.now(tz_col).strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
         )
-        sel = st.selectbox("Seleccionar inspección:", df_hist["_label"].tolist(), key="h_sel")
 
-        if sel:
-            vid = int(sel.split(" | ")[0].replace("ID ",""))
-            row = df_hist[df_hist["id"]==vid].iloc[0]
-            editando     = st.session_state.editando_id == vid
-            df_items_sel = db.obtener_items_inspeccion(vid)
+    st.divider()
+    cols_tabla = ["id","fecha_registro","nombre_lote","responsable","cliente_proyecto",
+                  "cont_tipo","eficiencia_pct","contenedores_nec","vol_total_m3",
+                  "peso_total_kg","observaciones"]
+    cols_ex = [c for c in cols_tabla if c in df_hist.columns]
+    st.dataframe(df_hist[cols_ex], use_container_width=True, hide_index=True)
 
-            if not editando:
-                c1,c2,c3 = st.columns(3)
-                with c1:
-                    st.info(f"**Máquina:** {row['maquina']}")
-                    st.write(f"**Semana:** {row.get('fecha_ini','')} → {row.get('fecha_fin','')}")
-                    st.write(f"**Modelo:** {row.get('modelo','')}")
-                    st.write(f"**Marca:** {row.get('marca','')}")
-                    st.write(f"**Placa/Serie:** {row.get('placa','')}")
-                with c2:
-                    st.write(f"**Trabajador:** {row.get('trabajador','')}")
-                    st.write(f"**Revisado por:** {row.get('revisado_por','')}")
-                    st.write(f"**Cliente/Proyecto:** {row.get('cliente_proyecto','')}")
-                    st.write(f"**Resp. Mantenimiento:** {row.get('responsable_mantenimiento','')}")
-                with c3:
-                    estado_raw = str(row.get("estado",""))
-                    color = "🟢" if "Aprobada" in estado_raw else ("🔴" if "Rechazada" in estado_raw else "🟡")
-                    st.write(f"**Estado:** {color} {estado_raw}")
-                    st.write(f"**Observaciones:** {row.get('observaciones','')}")
+    st.divider()
+    st.subheader("🔎 Ver Detalle / Eliminar")
 
-                if not df_items_sel.empty:
-                    num_nc = len(df_items_sel[df_items_sel["resultado"]=="NC"])
-                    num_c  = len(df_items_sel[df_items_sel["resultado"]=="C"])
-                    st.write(f"**Resultado ítems:** 🟢 {num_c} Conformes · 🔴 {num_nc} No Conformes")
+    df_hist["_label"] = df_hist.apply(
+        lambda r: f"ID {r['id']} | {str(r.get('fecha_registro',''))[:16]} | {r['nombre_lote']} | {r.get('responsable','')}",
+        axis=1
+    )
+    sel = st.selectbox("Seleccionar lote:", df_hist["_label"].tolist(), key="h_sel")
 
-                    for sec in df_items_sel["seccion"].unique():
-                        items_sec = df_items_sel[df_items_sel["seccion"]==sec].copy()
-                        st.markdown(f"**{sec}**")
-                        dias_unicos = items_sec["dia"].unique().tolist()
-                        for dia in dias_unicos:
-                            st.markdown(f"📅 **{dia}**")
-                            for item_num in items_sec["item_numero"].unique():
-                                fila_i = items_sec[items_sec["item_numero"]==item_num]
-                                desc_i = fila_i.iloc[0]["descripcion"]
-                                res_d  = fila_i[fila_i["dia"]==dia]["resultado"].values
-                                val_d  = res_d[0] if len(res_d)>0 else "—"
-                                col_d, col_r = st.columns([5,1])
-                                with col_d:
-                                    st.markdown(f"<div class='item-label'>{item_num}. {desc_i}</div>", unsafe_allow_html=True)
-                                with col_r:
-                                    st.write(badge_resultado(val_d))
+    if sel:
+        vid = int(sel.split(" | ")[0].replace("ID ",""))
+        row = df_hist[df_hist["id"] == vid].iloc[0]
 
-                bc1,bc2 = st.columns(2)
-                with bc1:
-                    if st.button("✏️ Editar esta inspección", key=f"eb_{vid}", use_container_width=True):
-                        st.session_state.editando_id = vid
-                        st.rerun()
-                with bc2:
-                    if st.button("🗑️ Eliminar", key=f"del_{vid}", use_container_width=True):
-                        if db.eliminar_inspeccion(vid):
-                            st.success("✅ Inspección eliminada correctamente.")
-                            st.rerun()
+        col_i1, col_i2, col_i3 = st.columns(3)
+        with col_i1:
+            st.info(f"**Lote:** {row['nombre_lote']}")
+            st.write(f"**Responsable:** {row.get('responsable','')}")
+            st.write(f"**Cliente/Proyecto:** {row.get('cliente_proyecto','')}")
+        with col_i2:
+            st.write(f"**Contenedor:** {row.get('cont_tipo','')}")
+            st.write(f"**Dimensiones:** {row.get('cont_largo','')} × {row.get('cont_ancho','')} × {row.get('cont_alto','')} cm")
+            st.write(f"**Factor vol.:** {row.get('factor_vol','')}")
+        with col_i3:
+            st.metric("Eficiencia",         f"{row.get('eficiencia_pct',0):.1f}%")
+            st.metric("Contenedores usados", int(row.get('contenedores_nec', 0)))
+            st.metric("Vol. total m³",       f"{row.get('vol_total_m3',0):.3f}")
 
-            else:
-                st.markdown(f"#### ✏️ Editando inspección ID {vid}")
-                dias_previos = df_items_sel["dia"].unique().tolist() if not df_items_sel.empty else []
+        df_prod = db.obtener_productos_lote(vid)
+        if not df_prod.empty:
+            st.markdown("**Productos del lote:**")
+            st.dataframe(df_prod.rename(columns={
+                "nombre":"Producto","largo":"L(cm)","ancho":"A(cm)","alto":"H(cm)",
+                "peso_kg":"Peso real(kg)","cantidad":"Cant.",
+                "vol_unit_m3":"Vol/u m³","vol_total_m3":"Vol total m³",
+                "peso_vol_kg":"Peso vol(kg)","peso_cobrable":"P.Cobrable(kg)"
+            }).style.format({
+                "Vol/u m³":"{:.4f}","Vol total m³":"{:.4f}",
+                "Peso real(kg)":"{:.2f}","Peso vol(kg)":"{:.2f}","P.Cobrable(kg)":"{:.2f}"
+            }), use_container_width=True)
 
-                prev_vals = {}
-                if not df_items_sel.empty:
-                    sec_map = {
-                        "ANTES DE SU USO":                  ("au",   get_items_antes_uso(str(row["maquina"]))),
-                        "ELEMENTOS DE PROTECCIÓN PERSONAL":  ("epp",  ITEMS_EPP),
-                        "SEGURIDAD ELÉCTRICA":               ("elec", ITEMS_ELECTRICA),
-                    }
-                    for _, it in df_items_sel.iterrows():
-                        sec_key_map = sec_map.get(it["seccion"])
-                        if sec_key_map:
-                            sec_k, _ = sec_key_map
-                            idx_i = int(it["item_numero"])-1
-                            dia_v = it.get("dia","General")
-                            prev_vals[f"edit_{vid}_{sec_k}_{idx_i}_{dia_v}"] = it["resultado"]
+            g1, g2 = st.columns(2)
+            with g1:
+                st.plotly_chart(grafico_torta(df_prod), use_container_width=True)
+            with g2:
+                st.plotly_chart(grafico_barras_comp(df_prod), use_container_width=True)
 
-                st.markdown("<div class='seccion-titulo'>🏭 DATOS DEL EQUIPO</div>", unsafe_allow_html=True)
-                ec1,ec2,ec3,ec4,ec5,ec6 = st.columns(6)
-                with ec1: e_fecha_ini = st.date_input("📅 Fecha Inicio", value=row.get("fecha_ini",date.today()), key=f"efi_{vid}")
-                with ec2: e_fecha_fin = st.date_input("📅 Fecha Fin",   value=row.get("fecha_fin",date.today()), key=f"eff_{vid}")
-                with ec3:
-                    maq_idx = MAQUINAS.index(row["maquina"]) if row["maquina"] in MAQUINAS else 0
-                    e_maq   = st.selectbox("⚙️ Máquina", MAQUINAS, index=maq_idx, key=f"em_{vid}")
-                with ec4: e_modelo = st.text_input("Modelo", value=str(row.get("modelo","") or ""), key=f"emod_{vid}")
-                with ec5: e_marca  = st.text_input("Marca",  value=str(row.get("marca", "") or ""), key=f"emarca_{vid}")
-                with ec6: e_placa  = st.text_input("Placa",  value=str(row.get("placa", "") or ""), key=f"eplaca_{vid}")
-
-                if e_fecha_fin < e_fecha_ini:
-                    st.error("La fecha fin no puede ser anterior a la fecha inicio.")
-                else:
-                    delta_e = min((e_fecha_fin - e_fecha_ini).days + 1, 7)
-                    dias_nombres_es = ["Lun","Mar","Mier","Juev","Vier","Sáb","Dom"]
-                    dias_labels_e = []
-                    for i in range(delta_e):
-                        d = e_fecha_ini + timedelta(days=i)
-                        dias_labels_e.append(f"{dias_nombres_es[d.weekday()]} {d.strftime('%d/%m')}")
-
-                    st.markdown("<div class='seccion-titulo'>📅 DÍAS TRABAJADOS</div>", unsafe_allow_html=True)
-                    cols_de = st.columns(len(dias_labels_e))
-                    dias_activos_e = []
-                    for j, label in enumerate(dias_labels_e):
-                        with cols_de[j]:
-                            if st.checkbox(label, value=(label in dias_previos or True), key=f"edit_{vid}_dia_{j}"):
-                                dias_activos_e.append(label)
-
-                    if dias_activos_e:
-                        items_antes_uso_e = get_items_antes_uso(e_maq)
-                        render_seccion_por_dia("ANTES DE SU USO", items_antes_uso_e,
-                                               f"edit_{vid}", "au",   dias_activos_e, prev_vals)
-                        render_seccion_por_dia("ELEMENTOS DE PROTECCIÓN PERSONAL", ITEMS_EPP,
-                                               f"edit_{vid}", "epp",  dias_activos_e, prev_vals)
-                        render_seccion_por_dia("SEGURIDAD ELÉCTRICA", ITEMS_ELECTRICA,
-                                               f"edit_{vid}", "elec", dias_activos_e, prev_vals)
-
-                st.markdown("<div class='seccion-titulo'>📋 DATOS DE CONTROL</div>", unsafe_allow_html=True)
-                ee1,ee2,ee3,ee4 = st.columns(4)
-                with ee1: e_trab = st.text_input("👷 Trabajador *",       value=str(row.get("trabajador","") or ""), key=f"etrab_{vid}")
-                with ee2: e_rev  = st.text_input("👤 Revisado por *",     value=str(row.get("revisado_por","") or ""), key=f"erev_{vid}")
-                with ee3: e_cli  = st.text_input("🏢 Cliente/Proyecto *", value=str(row.get("cliente_proyecto","") or ""), key=f"ecli_{vid}")
-                with ee4: e_mant = st.text_input("🔧 Resp. Mant. *",      value=str(row.get("responsable_mantenimiento","") or ""), key=f"emant_{vid}")
-
-                estados_l  = [e.split(" ",1)[1] for e in ESTADOS_INSPECCION]
-                est_actual = str(row.get("estado") or "Aprobada")
-                est_idx = next((i for i,e in enumerate(estados_l) if est_actual in e or e in est_actual), 0)
-
-                ef1,ef2 = st.columns([1,3])
-                with ef1: e_estado = st.selectbox("🚦 Estado", ESTADOS_INSPECCION, index=est_idx, key=f"eest_{vid}")
-                with ef2: e_obs    = st.text_area("💬 Observaciones", value=str(row.get("observaciones","") or ""), key=f"eobs_{vid}", height=80)
-
-                st.divider()
-                sg1,sg2 = st.columns(2)
-                with sg1:
-                    guardar_edit  = st.button("💾 Guardar Cambios", type="primary", key=f"guardar_edit_{vid}", use_container_width=True)
-                with sg2:
-                    cancelar_edit = st.button("❌ Cancelar Edición", key=f"cancelar_edit_{vid}", use_container_width=True)
-
-                if guardar_edit:
-                    errores_edit = validar_datos_control(e_trab, e_rev, e_cli, e_mant)
-                    if errores_edit:
-                        st.error("❌ Completa los campos obligatorios:")
-                        for err in errores_edit: st.markdown(f"- {err}")
-                    else:
-                        items_edit = construir_items_semanal(f"edit_{vid}", dias_activos_e, e_maq)
-                        datos_edit = {
-                            "fecha_ini":e_fecha_ini,"fecha_fin":e_fecha_fin,
-                            "maquina":e_maq,"modelo":e_modelo,"marca":e_marca,"placa":e_placa,
-                            "trabajador":e_trab.strip(),"revisado_por":e_rev.strip(),
-                            "cliente_proyecto":e_cli.strip(),"responsable_mantenimiento":e_mant.strip(),
-                            "estado":e_estado.split(" ",1)[1] if " " in e_estado else e_estado,
-                            "observaciones":e_obs,
-                        }
-                        if db.actualizar_inspeccion(vid, datos_edit, items_edit):
-                            st.success("✅ Inspección actualizada correctamente.")
-                            st.session_state.editando_id = None
-                            st.rerun()
-
-                if cancelar_edit:
-                    st.session_state.editando_id = None
-                    st.rerun()
-    else:
-        st.warning("No hay inspecciones con los filtros seleccionados.")
+        if st.button("🗑️ Eliminar este lote", key=f"del_{vid}"):
+            if db.eliminar_lote(vid):
+                st.success("✅ Lote eliminado.")
+                st.rerun()
 
 
+# ==================== TAB 3: DASHBOARD ====================
 def tab_dashboard(db: DB):
-    st.markdown("### 📊 Dashboard de Inspecciones")
+    st.markdown("### 📊 Dashboard de Cubicaje")
     try:
-        import plotly.express as px
-
-        col_r1,_ = st.columns([2,4])
-        with col_r1:
-            rango = st.date_input("Período",
-                                   value=(datetime.now().replace(day=1), datetime.now()),
-                                   key="dash_rango")
-
-        if not (isinstance(rango,(list,tuple)) and len(rango)==2):
+        col_r, _ = st.columns([2, 4])
+        with col_r:
+            rango = st.date_input(
+                "Período",
+                value=(datetime.now().replace(day=1), datetime.now()),
+                key="dash_rango"
+            )
+        if not (isinstance(rango, (list, tuple)) and len(rango) == 2):
             st.info("Selecciona un rango de fechas completo.")
             return
 
@@ -1157,112 +837,76 @@ def tab_dashboard(db: DB):
             st.info("No hay datos en este período.")
             return
 
-        total  = len(df_s)
-        apro   = len(df_s[df_s["estado"].str.contains("Aprobada",na=False)])
-        obs_c  = len(df_s[df_s["estado"].str.contains("Observaciones",na=False)])
-        rech_c = len(df_s[df_s["estado"].str.contains("Rechazada",na=False)])
-        pct    = round(apro/total*100) if total>0 else 0
-        total_nc = int(df_s["num_nc"].sum())
+        total       = len(df_s)
+        vol_total   = df_s["vol_total_m3"].sum()
+        peso_total  = df_s["peso_total_kg"].sum()
+        ef_prom     = df_s["eficiencia_pct"].mean()
+        cont_total  = df_s["contenedores_nec"].sum()
 
         k1,k2,k3,k4,k5 = st.columns(5)
-        k1.metric("🔧 Total",           total)
-        k2.metric("✅ Aprobadas",        apro,   f"{pct}%")
-        k3.metric("⚠️ Con Obs.",         obs_c)
-        k4.metric("❌ Rechazadas",        rech_c)
-        k5.metric("🔴 NC detectadas",    total_nc)
+        k1.metric("📦 Total Lotes",           total)
+        k2.metric("📐 Vol. Total m³",          f"{vol_total:.3f}")
+        k3.metric("⚖️ Peso Total kg",           f"{peso_total:.1f}")
+        k4.metric("📊 Eficiencia Promedio",     f"{ef_prom:.1f}%")
+        k5.metric("🚛 Contenedores Utilizados", int(cont_total))
 
         st.divider()
-        g1,g2 = st.columns(2)
+        g1, g2 = st.columns(2)
         with g1:
-            st.markdown("#### Distribución por Estado")
-            est_c_df = df_s["estado"].value_counts().reset_index()
-            est_c_df.columns = ["estado","cantidad"]
-            colores_est = {"Aprobada":"#2ecc71","Con Observaciones":"#f39c12","Rechazada":"#e74c3c"}
-            fig1 = px.pie(est_c_df,values="cantidad",names="estado",hole=0.45,
-                          color="estado",color_discrete_map=colores_est)
-            fig1.update_layout(margin=dict(t=10,b=10),height=300)
-            st.plotly_chart(fig1,use_container_width=True)
+            st.markdown("#### Volumen por Lote (m³)")
+            df_vol = df_s.sort_values("vol_total_m3", ascending=True)
+            fig_v = px.bar(df_vol, x="vol_total_m3", y="nombre_lote",
+                           orientation="h", text="vol_total_m3",
+                           color="vol_total_m3", color_continuous_scale="Blues")
+            fig_v.update_traces(texttemplate="%{text:.3f}", textposition="outside")
+            fig_v.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=max(280, total*40),
+                                 coloraxis_showscale=False, margin=dict(t=10,b=10),
+                                 xaxis_title="m³", yaxis_title="")
+            st.plotly_chart(fig_v, use_container_width=True)
+
         with g2:
-            st.markdown("#### Inspecciones por Semana")
-            df_dia = df_s.groupby("fecha").size().reset_index(name="inspecciones")
-            fig2 = px.bar(df_dia,x="fecha",y="inspecciones",
-                          color_discrete_sequence=["#2c5364"],text="inspecciones")
-            fig2.update_traces(textposition="outside")
-            fig2.update_layout(margin=dict(t=10,b=10),height=300,xaxis_title="",yaxis_title="Inspecciones")
-            st.plotly_chart(fig2,use_container_width=True)
+            st.markdown("#### Eficiencia por Lote (%)")
+            df_ef = df_s.sort_values("eficiencia_pct", ascending=True)
+            fig_ef = px.bar(df_ef, x="eficiencia_pct", y="nombre_lote",
+                            orientation="h", text="eficiencia_pct",
+                            color="eficiencia_pct", color_continuous_scale="Greens",
+                            range_x=[0, 100])
+            fig_ef.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            fig_ef.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=max(280, total*40),
+                                  coloraxis_showscale=False, margin=dict(t=10,b=10),
+                                  xaxis_title="%", yaxis_title="")
+            st.plotly_chart(fig_ef, use_container_width=True)
 
         st.divider()
-        g3,g4 = st.columns(2)
+        g3, g4 = st.columns(2)
         with g3:
-            st.markdown("#### Inspecciones por Máquina")
-            df_maq = df_s.groupby("maquina").size().reset_index(name="inspecciones").sort_values("inspecciones")
-            fig3 = px.bar(df_maq,x="inspecciones",y="maquina",orientation="h",
-                          color="inspecciones",color_continuous_scale="Blues",text="inspecciones")
-            fig3.update_traces(textposition="outside")
-            fig3.update_layout(margin=dict(t=10,b=10),height=max(250,len(df_maq)*45),
-                               coloraxis_showscale=False,yaxis_title="",xaxis_title="Inspecciones")
-            st.plotly_chart(fig3,use_container_width=True)
+            st.markdown("#### Lotes por Responsable")
+            df_resp = df_s.groupby("responsable").size().reset_index(name="lotes")
+            fig_r = px.pie(df_resp, values="lotes", names="responsable",
+                           hole=0.4, color_discrete_sequence=px.colors.qualitative.Vivid)
+            fig_r.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=300, margin=dict(t=20,b=10))
+            st.plotly_chart(fig_r, use_container_width=True)
+
         with g4:
-            st.markdown("#### NC Promedio por Máquina")
-            df_nc_maq = df_s.groupby("maquina").agg(prom_nc=("num_nc","mean")).reset_index().sort_values("prom_nc")
-            df_nc_maq["prom_nc"] = df_nc_maq["prom_nc"].round(1)
-            fig4 = px.bar(df_nc_maq,x="prom_nc",y="maquina",orientation="h",
-                          color="prom_nc",color_continuous_scale="Reds",text="prom_nc")
-            fig4.update_traces(textposition="outside")
-            fig4.update_layout(margin=dict(t=10,b=10),height=max(250,len(df_nc_maq)*45),
-                               coloraxis_showscale=False,yaxis_title="",xaxis_title="NC promedio")
-            st.plotly_chart(fig4,use_container_width=True)
+            st.markdown("#### Unidades Totales por Lote")
+            df_un = df_s.sort_values("total_unidades", ascending=True)
+            fig_u = px.bar(df_un, x="total_unidades", y="nombre_lote",
+                           orientation="h", text="total_unidades",
+                           color="total_unidades", color_continuous_scale="Oranges")
+            fig_u.update_traces(textposition="outside")
+            fig_u.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=max(280, total*40),
+                                 coloraxis_showscale=False, margin=dict(t=10,b=10),
+                                 xaxis_title="Unidades", yaxis_title="")
+            st.plotly_chart(fig_u, use_container_width=True)
 
         st.divider()
-        g5,g6 = st.columns(2)
-        with g5:
-            st.markdown("#### % Aprobación por Máquina")
-            resumen_apr = df_s.groupby("maquina",as_index=False).agg(
-                aprobadas=("estado",lambda x:x.str.contains("Aprobada",na=False).sum()),
-                total    =("estado","count"),
-            )
-            resumen_apr["pct_apro"]=(resumen_apr["aprobadas"]/resumen_apr["total"]*100).round(1)
-            resumen_apr=resumen_apr.sort_values("pct_apro")
-            fig5=px.bar(resumen_apr,x="pct_apro",y="maquina",orientation="h",
-                        color="pct_apro",color_continuous_scale="Greens",
-                        text="pct_apro",range_x=[0,100])
-            fig5.update_traces(texttemplate="%{text}%",textposition="outside")
-            fig5.update_layout(margin=dict(t=10,b=10),height=max(250,len(resumen_apr)*45),
-                               coloraxis_showscale=False,yaxis_title="",xaxis_title="% Aprobación")
-            st.plotly_chart(fig5,use_container_width=True)
-        with g6:
-            st.markdown("#### Inspecciones por Día de la Semana")
-            df_s["dia_semana"]=pd.to_datetime(df_s["fecha"]).dt.day_name()
-            orden=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-            nombres_es={"Monday":"Lunes","Tuesday":"Martes","Wednesday":"Miércoles",
-                        "Thursday":"Jueves","Friday":"Viernes","Saturday":"Sábado","Sunday":"Domingo"}
-            df_sem=df_s.groupby("dia_semana").size().reset_index(name="inspecciones")
-            df_sem["orden"]=df_sem["dia_semana"].map({d:i for i,d in enumerate(orden)})
-            df_sem=df_sem.sort_values("orden")
-            df_sem["dia_es"]=df_sem["dia_semana"].map(nombres_es)
-            fig6=px.bar(df_sem,x="dia_es",y="inspecciones",
-                        color="inspecciones",color_continuous_scale="Oranges",text="inspecciones")
-            fig6.update_traces(textposition="outside")
-            fig6.update_layout(margin=dict(t=10,b=10),height=300,
-                               coloraxis_showscale=False,xaxis_title="",yaxis_title="Inspecciones")
-            st.plotly_chart(fig6,use_container_width=True)
+        st.markdown("#### 📋 Tabla Resumen")
+        cols_dash = ["nombre_lote","responsable","cliente_proyecto","fecha",
+                     "eficiencia_pct","contenedores_nec","vol_total_m3",
+                     "peso_total_kg","num_productos","total_unidades"]
+        cols_ex = [c for c in cols_dash if c in df_s.columns]
+        st.dataframe(df_s[cols_ex], use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.markdown("#### 🏆 Ranking de Inspectores")
-        df_insp=df_s[df_s["trabajador"].notna()&(df_s["trabajador"].str.strip()!="")].groupby("trabajador",as_index=False).agg(
-            inspecciones=("trabajador","count"),
-            aprobadas   =("estado",lambda x:x.str.contains("Aprobada",na=False).sum()),
-            con_obs     =("estado",lambda x:x.str.contains("Observaciones",na=False).sum()),
-            rechazadas  =("estado",lambda x:x.str.contains("Rechazada",na=False).sum()),
-            total_nc    =("num_nc","sum"),
-        ).sort_values("inspecciones",ascending=False)
-        df_insp["% Aprobación"]=(df_insp["aprobadas"]/df_insp["inspecciones"]*100).round(1).astype(str)+"%"
-        df_insp["total_nc"]=df_insp["total_nc"].astype(int)
-        df_insp.columns=["Inspector","Total","✅ Aprob.","⚠️ Obs.","❌ Rech.","🔴 NC Total","% Aprobación"]
-        st.dataframe(df_insp,use_container_width=True,hide_index=True)
-
-    except ImportError:
-        st.warning("Instala plotly: `pip install plotly`")
     except Exception as e:
         st.error(f"Error en dashboard: {e}")
 
@@ -1271,21 +915,18 @@ def tab_dashboard(db: DB):
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🔧 INSPECCIONES PREOPERACIONALES</h1>
-        <p>Registro y seguimiento de inspecciones de equipos — SCA ZF</p>
+        <h1>📦 SISTEMA DE CUBICAJE</h1>
+        <p>Registro, cálculo y seguimiento de cubicaciones y despachos — SCA ZF</p>
     </div>
     """, unsafe_allow_html=True)
 
     if "db" not in st.session_state:
         st.session_state.db = DB()
-    if "editando_id" not in st.session_state:
-        st.session_state.editando_id = None
 
     db = st.session_state.db
 
-    tab1,tab2,tab3 = st.tabs(["📝 Nueva Inspección","🔍 Historial y Reportes","📊 Dashboard"])
-
-    with tab1: tab_nueva_inspeccion(db)
+    tab1, tab2, tab3 = st.tabs(["📦 Nueva Cubicación", "🔍 Historial y Reportes", "📊 Dashboard"])
+    with tab1: tab_nueva_cubicacion(db)
     with tab2: tab_historial(db)
     with tab3: tab_dashboard(db)
 
